@@ -1,0 +1,38 @@
+# StockChart Win11 WebView2 版本
+
+## 概述
+本目录包含适用于 Windows 11 的 StockChart 股票图表分析工具，使用系统自带的 WebView2 (Edge Chromium) 渲染界面。
+
+## 版本说明
+
+| 文件名 | 主题 | 大小 |
+|--------|------|------|
+| StockChart_Win11_Dark.exe | 深色主题 | ~200 MB |
+| StockChart_Win11_Minimalist.exe | 极简主题 | ~200 MB |
+| StockChart_Win11_HighEnd.exe | 高端主题 | ~200 MB |
+| StockChart_Win11_Brutalist.exe | 粗野主义主题 | ~200 MB |
+
+## 系统要求
+- **操作系统**: Windows 11 (64位)
+- **WebView2**: Win11 自带，无需额外安装
+- **内存**: 建议 4GB 以上
+- **网络**: 需要联网获取股票数据
+
+## 使用方法
+1. 双击任意 `.exe` 文件即可启动
+2. 首次启动可能需要等待几秒钟加载数据
+3. 数据存储在 `Documents\StockChart\` 目录
+
+## 技术栈
+- **后端**: Flask + Python 3.13
+- **前端**: 系统 WebView2 (Edge Chromium)
+- **打包**: PyInstaller (单文件)
+- **包管理**: uv
+
+## 数据源
+- 新浪财经 API (K线数据)
+- 腾讯财经 API (实时行情)
+- BaoStock (备用数据源)
+
+---
+构建时间: 2025-07-25

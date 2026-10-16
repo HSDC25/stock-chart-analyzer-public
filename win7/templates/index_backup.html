@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>股票图表分析工具</title>
+ <script src="{{ url_for('static', filename='js/echarts.min.js') }}"></script>
+ <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+ <!-- 导航栏 -->
+ <nav class="navbar">
+ <a href="#" class="navbar-brand">
+ <span style="font-size:24px;"></span>
+ 股票图表分析工具
+ </a>
+ <ul class="navbar-nav">
+ <li><a href="#" class="nav-link active" onclick="setMode('filter'); return false;">指标筛选</a></li>
+ <li><a href="#" class="nav-link" onclick="setMode('code'); return false;">输入代码</a></li>
+ <li><a href="#" class="nav-link" onclick="setMode('ml'); return false;">技术分析</a></li>
+ </ul>
+ <div class="navbar-status">
+ <div class="font-switcher">
+ <button onclick="setFontSize('small')" id="btnSmall" title="小字">小</button>
+ <button onclick="setFontSize('medium')" id="btnMedium" class="active" title="中字">中</button>
+ <button onclick="setFontSize('large')" id="btnLarge" title="大字">大</button>
+ <button onclick="setFontSize('extra-large')" id="btnExtraLarge" title="特大">特大</button>
+ </div>
+ <span class="status-dot" id="statusDot"></span>
+ <span id="statusText">检查中...</span>
+ <span class="clock" id="realtimeClock">--:--:--</span>
+ </div>
+ </nav>
+ 
+ <!-- 主内容 -->
+ <div class="main-container">
+ <!-- 侧边栏 -->
+ <div class="sidebar">
+ <!-- 预加载进度 -->
+ <div class="preload-section">
+ <div class="preload-header">
+ <span class="preload-title"> 数据加载</span>
+ <span class="preload-percent" id="preloadPercent">0%</span>
+ </div>
+ <div class="progress-bar">
+ <div class="progress-fill" id="preloadBar" style="width:0%"></div>
+ </div>
+ <div class="preload-info">
+ <span id="preloadDetail">等待开始...</span>
+ <span id="preloadCount">0 / 0</span>
+ </div>
+ <button class="btn btn-success btn-block" id="preloadBtn" onclick="startPreload()" style="margin-top:10px;">
+ 开始加载
+ </button>
+ </div>
+ 
+ <!-- 模式一：指标筛选 -->
+ <div id="filterMode">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 高级指标筛选</div>
+ <div class="form-row">
+ <div class="form-group">
+ <label class="form-label">3日涨幅下限%</label>
+ <input type="number" class="form-input" id="threeDayChangeMin" placeholder="20" step="0.01">
+ </div>
+ <div class="form-group">
+ <label class="form-label">量变率下限%</label>
+ <input type="number" class="form-input" id="volumeChangePctMin" placeholder="10" step="0.01">
+ </div>
+ </div>
+ <div class="form-group">
+ <label class="form-label">排序方式</label>
+ <select class="form-input" id="sortOrder">
+ <option value="default">默认排序</option>
+ <option value="price_asc">价格从低到高</option>
+ <option value="price_desc">价格从高到低</option>
+ </select>
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="searchStocks()"> 筛选股票</button>
+ <button class="btn btn-secondary btn-block" onclick="resetFilters()" style="margin-top:8px;"> 重置条件</button>
+ </div>
+ 
+ <!-- 模式二：输入代码 -->
+ <div id="codeMode" style="display:none;">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 输入股票代码</div>
+ <div class="form-group">
+ <label class="form-label">股票代码</label>
+ <input type="text" class="form-input" id="codesInput" placeholder="输入代码，如: 000001">
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="searchByCodes()"> 查看股票</button>
+ <button class="btn btn-secondary btn-block" onclick="resetFilters()" style="margin-top:8px;"> 重置</button>
+ </div>
+ 
+ <!-- 模式三：技术分析 -->
+ <div id="mlMode" style="display:none;">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 智能分析</div>
+ <p style="font-size:12px;color:#666;margin-bottom:12px;">
+ 基于技术指标的综合分析，仅供参考学习，不构成投资建议。
+ </p>
+ <div id="mlPredictResult" class="analysis-result" style="display:none;">
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="predictStock()"> 开始分析</button>
+ 
+ <div class="sidebar-section" style="margin-top:20px;">
+ <div class="sidebar-title"> 潜力股筛选</div>
+ <div class="form-group">
+ <label class="form-label">显示数量</label>
+ <input type="number" class="form-input" id="mlTopN" value="20" min="5" max="100">
+ </div>
+ <button class="btn btn-success btn-block" onclick="runMLScreen()"> 开始筛选</button>
+ <div id="mlScreenResult" style="margin-top:10px;"></div>
+ </div>
+ </div>
+ </div>
+ 
+ <!-- 内容区 -->
+ <div class="content">
+ <!-- 股票列表 -->
+ <div class="stock-list-section" id="stockListSection">
+ <div class="stock-list-header">
+ <h3> 股票列表</h3>
+ <span class="stock-count" id="stockCount">等待筛选</span>
+ </div>
+ <div style="overflow:auto;">
+ <table class="stock-table">
+ <thead>
+ <tr>
+ <th>代码</th>
+ <th>名称</th>
+ <th class="text-right">价格</th>
+ <th class="text-right">涨跌幅</th>
+ <th class="text-right">3日涨幅</th>
+ <th class="text-right">量变%</th>
+ <th class="text-right">PE</th>
+ <th class="text-right">PB</th>
+ <th class="text-right">市值(亿)</th>
+ </tr>
+ </thead>
+ <tbody id="stockListBody">
+ <tr><td colspan="9" style="text-align:center;color:#999;padding:40px;">点击左侧"筛选股票"或"输入代码"开始</td></tr>
+ </tbody>
+ </table>
+ </div>
+ </div>
+ 
+ <!-- 图表区 -->
+ <div class="chart-section">
+ <div class="chart-header">
+ <h2 id="chartTitle">请选择股票查看图表</h2>
+ <div class="chart-actions">
+ <span style="font-size:13px;color:#666;padding:6px 10px;">近 3 个交易日</span>
+ <select id="chartFreq" onchange="changeFreq(this.value)" class="form-input" style="width:auto;padding:6px 12px;">
+ <option value="daily">日K</option>
+ <option value="5min">5分钟分时</option>
+ </select>
+ <button class="btn btn-info btn-sm" onclick="exportChart()"> 导出</button>
+ </div>
+ </div>
+ <div class="chart-container" id="chartContainer">
+ <div class="empty-state">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+ <path d="M3 3v18h18"/>
+ <path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/>
+ </svg>
+ <p>点击左侧股票列表查看K线图表</p>
+ </div>
+ </div>
+ </div>
+ </div>
+ </div>
+ 
+ <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+# ── Python 缓存 / 虚拟环境 ──
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.venv-win7/
+.coverage
+
+# ── 构建产物 ──
+# 命名规则：dist/ 带构建日期版本号，outputs/ 是稳定名的最新一份（见根 README）
+build/
+dist/
+outputs/
+
+# ── 自动更新发布产物与代码签名材料（PFX 含私钥，绝不入库）──
+update_dist/
+signing/
+*.pfx
+*.cer
+
+# ── Win7 内嵌 Python 运行时（体积大，由构建脚本重建）──
+win7/python38-amd64/
+win7/python38-win32/
+win7/python38-win7/
+win7/win7_runtime/
+
+# ── 二进制 / 压缩包 ──
+*.zip
+*.exe
+
+# ── 备份与日志 ──
+*.bak
+*.bak2
+*.security_bak
+*.log
+
+# ── 仓库根的一次性脚本与临时产物（带 / 前缀，避免误伤 tests/）──
+/nul
+/test_output/
+/test_*.py
+/test_api.html
+/temp_check.js
+/_patch_html.py
+/bandit-*.json
+/final.json
+/run_debug.py
+/run_onefile_test.py
+/pythonnet_config.json
+
+# ── 工具与会话工作区 ──
+uploads/
+vibe_images/
+.deploy/
+.mimosa/
+.workbuddy/
+
+# ── 内部安全文档与 LaTeX 编译产物（公开仓库不入库）──
+docs/安全审计_完整版.md
+docs/安全修复_TODO.md
+docs/审计_*.md
+docs/ACCEPTED_RISKS.md
+docs/FIX_PLAN.md
+*.aux
+*.toc

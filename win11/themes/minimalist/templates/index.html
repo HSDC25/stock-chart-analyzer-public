@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+ <!-- StockChart Minimalist（极简浅色） 主题页面。结构与其他主题一致，仅颜色值不同；交互逻辑全部在 static/js/app.js（四主题共享同一份）。 -->
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>股票图表分析工具</title>
+ <script src="{{ url_for('static', filename='js/echarts.min.js') }}" defer></script>
+ <script src="{{ url_for('static', filename='js/xlsx.full.min.js') }}" defer></script>
+ <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+ <script src="/assets/js/update.js" defer></script>
+</head>
+<body>
+ <!-- 导航栏 -->
+ <nav class="navbar">
+ <a href="#" class="navbar-brand">
+ 股票图表分析工具
+ </a>
+ <ul class="navbar-nav">
+ <li><a href="#" role="button" class="nav-link active" onclick="setMode('filter'); return false;">指标筛选</a></li>
+ <li><a href="#" role="button" class="nav-link" onclick="setMode('rank'); return false;"> 排行榜</a></li>
+ <li><a href="#" role="button" class="nav-link" onclick="setMode('code'); return false;">输入代码</a></li>
+ <li><a href="#" role="button" class="nav-link" onclick="setMode('ml'); return false;">技术分析</a></li>
+ </ul>
+ <div class="navbar-status">
+ <div class="font-switcher">
+ <button onclick="setFontSize('small')" id="btnSmall" aria-pressed="false" title="小字">小</button>
+ <button onclick="setFontSize('medium')" id="btnMedium" class="active" aria-pressed="true" title="中字">中</button>
+ <button onclick="setFontSize('large')" id="btnLarge" aria-pressed="false" title="大字">大</button>
+ <button onclick="setFontSize('extra-large')" id="btnExtraLarge" aria-pressed="false" title="特大">特大</button>
+ </div>
+ <span class="data-date-badge loading-pulse" id="dataDateLabel" aria-label="数据日期">数据加载中...</span>
+ <span class="status-dot" id="statusDot" aria-label="数据状态"></span>
+ <span id="statusText">检查中...</span>
+ <span class="clock" id="realtimeClock">--:--:--</span>
+ </div>
+ </nav>
+ 
+ <!-- 主内容 -->
+ <div class="main-container">
+ <!-- 侧边栏 -->
+ <div class="sidebar">
+ <!-- 预加载进度 -->
+ <div class="preload-section">
+ <div class="preload-header">
+ <span class="preload-title"> 数据加载</span>
+ <span class="preload-percent" id="preloadPercent">0%</span>
+ </div>
+ <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+ <div class="progress-fill" id="preloadBar" style="width:0%"></div>
+ </div>
+ <div class="preload-info loading-pulse">
+ <span id="preloadDetail">等待开始...</span>
+ <span id="preloadCount">0 / 0</span>
+ </div>
+ <button class="btn btn-success btn-block" id="preloadBtn" onclick="startPreload()" style="margin-top:10px;">
+ 开始加载
+ </button>
+ </div>
+ 
+ <!-- 模式一：指标筛选 -->
+ <div id="filterMode">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 高级指标筛选</div>
+ <div class="form-row">
+ <div class="form-group">
+ <label class="form-label">3日涨幅下限%</label>
+ <input type="number" class="form-input" id="threeDayChangeMin" placeholder="20" step="0.01">
+ </div>
+ <div class="form-group">
+ <label class="form-label">量变率下限%</label>
+ <input type="number" class="form-input" id="volumeChangePctMin" placeholder="10" step="0.01">
+ </div>
+ </div>
+ <div class="form-group">
+ <label class="form-label">排序方式</label>
+ <select class="form-input" id="sortOrder">
+ <option value="default">默认排序</option>
+ <option value="price_asc">价格从低到高</option>
+ <option value="price_desc">价格从高到低</option>
+ </select>
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="searchStocks()"> 筛选股票</button>
+ <button class="btn btn-secondary btn-block" onclick="resetFilters()" style="margin-top:8px;"> 重置条件</button>
+ </div>
+ 
+ <!-- 模式二：输入代码 -->
+ <div id="codeMode" style="display:none;">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 输入股票代码</div>
+ <div class="form-group">
+ <label class="form-label">股票代码</label>
+ <input type="text" class="form-input" id="codesInput" placeholder="输入代码，如: 000001">
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="searchByCodes()"> 查看股票</button>
+ <button class="btn btn-secondary btn-block" onclick="resetFilters()" style="margin-top:8px;"> 重置</button>
+ </div>
+ 
+ <!-- 模式三：技术分析 -->
+ <div id="mlMode" style="display:none;">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 智能分析</div>
+ <p class="muted-text" style="font-size:12px;margin-bottom:12px;">
+ 基于技术指标的综合分析，仅供参考学习，不构成投资建议。
+ </p>
+ <div id="mlPredictResult" class="analysis-result" style="display:none;">
+ </div>
+ </div>
+ <button class="btn btn-primary btn-block" onclick="predictStock()"> 开始分析</button>
+ 
+ <div class="sidebar-section" style="margin-top:20px;">
+ <div class="sidebar-title"> 潜力股筛选</div>
+ <div class="form-group">
+ <label class="form-label">显示数量</label>
+ <input type="number" class="form-input" id="mlTopN" value="20" min="5" max="100">
+ </div>
+ <button class="btn btn-success btn-block" onclick="runMLScreen()"> 开始筛选</button>
+ <div id="mlScreenResult" style="margin-top:10px;"></div>
+ </div>
+ </div>
+ 
+ <!-- 模式四：排行榜 -->
+ <div id="rankMode" style="display:none;">
+ <div class="sidebar-section">
+ <div class="sidebar-title"> 涨幅排行榜</div>
+ <p class="muted-text" style="font-size:12px;margin-bottom:12px;">
+ 查看近期涨幅排名靠前的股票。数据仅供参考，不构成投资建议。
+ </p>
+<button class="btn btn-warning btn-block" id="btnTop3" onclick="loadTop3Day()"> 三日涨幅前五十</button>
+<button class="btn btn-info btn-block" style="margin-top:10px;" id="btnTop5" onclick="loadTop5Day()"> 五日涨幅前五十</button>
+<button class="btn btn-danger btn-block" style="margin-top:10px;" id="btnMonthlyTop" onclick="loadMonthlyTop()"> 月度涨幅前五十</button>
+ </div>
+ <div class="sidebar-section" style="margin-top:20px;">
+ <div class="sidebar-title"> 高级筛选</div>
+ <p class="muted-text" style="font-size:12px;margin-bottom:12px;">基于价量和K线形态选股<br><small>涨停判定：主板 10% / 创业板 20%</small></p>
+ <div class="form-group" style="margin-bottom:0;">
+ <select id="rankModeSelect" onchange="runAdvancedScreen(this.value)">
+ <option value="">选择筛选方式</option>
+ <option value="firstLimitUp">首次涨停</option>
+ <option value="limitUpVolume">涨停+放量2.5倍</option>
+ <option value="consecutiveUp">连阳5-7天≤20%</option>
+ <option value="volumeSurge">换手率放量≥3倍</option>
+ <option value="limitUpPullback">涨停回调6-7%</option>
+ <option value="bigUpDays">20日大涨天数排行</option>
+ <option value="limitUpDays">20日涨停天数排行</option>
+ <option value="strongPick">20日强势精选</option>
+ </select>
+ </div>
+ </div>
+
+ <div class="sidebar-section" style="margin-top:20px;">
+ <div class="sidebar-title"> 自定义查询</div>
+ <div class="form-group">
+ <label class="form-label">最大股价(元)</label>
+ <input type="number" class="form-input" id="rankMaxPrice" placeholder="不限">
+ </div>
+ <div class="form-group">
+ <label class="form-label">最低涨幅%</label>
+ <input type="number" class="form-input" id="rankMinChange" placeholder="不限">
+ </div>
+ <div class="form-group">
+ <label class="form-label">显示数量</label>
+ <input type="number" class="form-input" id="rankLimit" value="50" min="10" max="500">
+ </div>
+ <button class="btn btn-primary btn-block" id="btnCustomRank" onclick="loadCustomRank()"> 查询</button>
+ </div>
+ </div>
+ </div>
+ 
+ <!-- 内容区（表格 + 底部 K 线图面板） -->
+ <div class="content">
+ <div class="content-topbar">
+ <h3 id="resultTitle"> 股票列表</h3>
+ <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+ <span class="muted-text" style="font-size:var(--font-small);"> 双击行查看K线图</span>
+ <button class="btn btn-secondary btn-sm" onclick="exportToTxt()"> 导出TXT</button>
+ <button class="btn btn-secondary btn-sm" onclick="exportToExcel()" style="margin-left:6px;"> 导出Excel</button>
+ <span class="stock-count" id="stockCount">等待查询</span>
+ </div>
+ </div>
+ <div class="table-container">
+ <table class="stock-table">
+ <thead>
+ <tr>
+ <th>#</th>
+ <th onclick="sortTable('code')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">代码 <span class="sort-arrow" id="sort_code"></span></th>
+ <th onclick="sortTable('name')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">名称 <span class="sort-arrow" id="sort_name"></span></th>
+ <th onclick="sortTable('price')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">价格 <span class="sort-arrow" id="sort_price"></span></th>
+ <th onclick="sortTable('change_pct')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">涨跌幅 <span class="sort-arrow" id="sort_change_pct"></span></th>
+ <th onclick="sortTable('n_day_change')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;" id="thExtra">N日涨幅 <span class="sort-arrow" id="sort_n_day_change"></span></th>
+ <th onclick="sortTable('volume_change_pct')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">量变率 <span class="sort-arrow" id="sort_volume_change_pct"></span></th>
+ <th onclick="sortTable('pe')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">PE <span class="sort-arrow" id="sort_pe"></span></th>
+ <th onclick="sortTable('pb')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">PB <span class="sort-arrow" id="sort_pb"></span></th>
+ <th onclick="sortTable('market_cap')" tabindex="0" aria-label="点击排序" style="cursor:pointer;user-select:none;">市值(亿) <span class="sort-arrow" id="sort_market_cap"></span></th>
+ </tr>
+ </thead>
+ <tbody id="stockListBody">
+ <tr><td colspan="10" class="loading-pulse" style="text-align:center;color:#999;padding:60px;">请使用左侧功能开始查询</td></tr>
+ </tbody>
+ </table>
+ </div>
+ <!-- 底部 K 线图弹出面板 -->
+ <div id="chartPanel" class="chart-panel">
+ <div class="chart-panel-dragbar" id="chartDragBar" title="拖动调整图表高度"></div>
+ <div class="chart-panel-header">
+ <span id="chartTitle" class="chart-title" style="font-size:var(--font-base);font-weight:600;">K线图</span>
+ <button class="btn btn-secondary btn-sm" onclick="closeChartPanel()" aria-label="关闭图表面板"> 关闭</button>
+ </div>
+ <div id="chartContainer" style="flex:1;position:relative;"></div>
+ </div>
+ </div>
+ </div>
+ 
+ <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
