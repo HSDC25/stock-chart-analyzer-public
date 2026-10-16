@@ -1,0 +1,340 @@
+% !TEX program = xelatex
+\documentclass[14pt,a4paper]{ctexart}
+\usepackage[margin=2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{fontspec}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+
+% 设置字体
+\setmainfont{SimSun}
+\setCJKmainfont{SimHei}
+
+% 颜色定义
+\definecolor{warningred}{RGB}{200,50,50}
+\definecolor{lightbg}{RGB}{255,250,230}
+\definecolor{darkwarning}{RGB}{180,80,0}
+
+% 页眉页脚
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\large\bfseries 股票图表分析工具 · 产品说明书}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{1pt}
+
+% 大标题样式
+\newcommand{\bigtitle}[1]{\vspace{1em}{\Huge\bfseries #1}\vspace{0.5em}}
+\newcommand{\sectitle}[1]{\vspace{1em}{\Large\bfseries\color{darkwarning} #1}\vspace{0.3em}}
+
+\begin{document}
+
+% ═══════════════════════════════════════════════════════════════
+% 封面
+% ═══════════════════════════════════════════════════════════════
+\begin{center}
+\vspace*{2cm}
+
+{\Huge\bfseries 股票图表分析工具}
+
+\vspace{0.5em}
+{\Large Product Manual}
+
+\vspace{2cm}
+
+\begin{tikzpicture}
+  \draw[warningred, line width=2pt, rounded corners=10pt] (-6,-3) rectangle (6,3);
+  \node at (0,1.5) {\Large\bfseries ⚠️ 重要声明};
+  \node at (0,0) {\large 请在使用前完整阅读};
+  \node at (0,-1.5) {\large 本说明书所有免责声明};
+\end{tikzpicture}
+
+\vspace{2cm}
+{\large 版本：V1.0}
+\vspace{0.3em}
+
+{\large 发布日期：2026年7月}
+\vspace{2em}
+
+\begin{tcolorbox}[colback=lightbg,colframe=warningred,title=\textbf{📋 使用说明},fonttitle=\bfseries\large]
+\begin{itemize}[leftmargin=1.5em]
+  \item 本工具仅供\textbf{学习和研究}使用
+  \item \textbf{不构成任何投资建议}
+  \item 股市有风险，投资需谨慎
+  \item 请根据自身风险承受能力谨慎决策
+\end{itemize}
+\end{tcolorbox}
+
+\end{center}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 目录
+% ═══════════════════════════════════════════════════════════════
+\tableofcontents
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第一部分：免责声明（重中之重）
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第一部分：重要免责声明 \quad ⚠️ 请仔细阅读}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=\textbf{🔴 最高级别风险提示},fonttitle=\bfseries\large]
+\setstretch{1.3}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{本工具仅为学习研究软件}，\textbf{不构成任何投资建议}，也不承诺任何收益。
+  
+  \item \textbf{股票市场存在巨大风险}，任何预测都可能出现错误，\textbf{投资者应独立判断并自行承担风险}。
+  
+  \item \textbf{本工具的AI预测功能基于历史数据}，历史表现不代表未来结果。\textbf{技术指标和机器学习模型在极端市场条件下可能完全失效}。
+  
+  \item \textbf{本工具不保证数据的准确性和实时性}。因网络延迟、数据源故障等原因导致的数据错误，\textbf{本工具不承担任何责任}。
+  
+  \item \textbf{投资决策应由投资者自行作出}。使用本工具所产生的任何直接或间接损失，\textbf{由使用者自行承担全部责任}。
+  
+  \item \textbf{未成年人、老年人及风险承受能力较低的投资者}，在使用本工具前应咨询专业投资顾问。
+  
+  \item \textbf{本工具的技术仍在持续完善中}，部分功能可能存在不稳定情况，请理解和支持。
+\end{enumerate}
+\end{tcolorbox}
+
+\vspace{1em}
+
+\begin{tcolorbox}[colback=lightbg,colframe=darkwarning,title=\textbf{📖 致老年朋友的话},fonttitle=\bfseries\large]
+\setstretch{1.3}
+亲爱的老年朋友：
+
+您好！感谢您使用本工具。为了您的资金安全，我们特别想跟您说几句心里话：
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{股票投资不是储蓄}，存在亏损可能，请勿将养老金、生活费用于高风险投资。
+  
+  \item \textbf{不要轻信任何"稳赚不赔"的说法}。如果有人告诉您某个股票一定赚钱，请提高警惕，这可能是陷阱。
+  
+  \item \textbf{本工具的预测仅供参考}，就像天气预报一样，不可能百分之百准确。
+  
+  \item \textbf{建议您先学习、观察}，用小额资金尝试，不要一开始就投入大量资金。
+  
+  \item \textbf{遇到不懂的地方}，请多问子女、朋友，或者咨询银行、证券公司的专业理财经理。
+  
+  \item \textbf{切勿将账号密码告诉任何人}，切勿向陌生人转账汇款。
+\end{itemize}
+
+\vspace{0.5em}
+\rightline{\textit{—— StockChart 开发团队}}
+\end{tcolorbox}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第二部分：产品介绍
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第二部分：产品介绍}
+
+\setstretch{1.3}
+\textbf{股票图表分析工具}是一款面向普通投资者的辅助分析软件，主要提供以下功能：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{K线图查看}：展示股票的历史价格走势
+  \item \textbf{技术指标分析}：MACD、RSI、布林带、均线等
+  \item \textbf{股票筛选}：按照价格、涨跌幅、成交量等条件筛选
+  \item \textbf{AI预测功能}（实验性）：基于历史数据的涨跌方向预测
+\end{enumerate}
+
+\vspace{1em}
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=blue!50!black,title=\textbf{⚙️ 技术说明},fonttitle=\bfseries\large]
+\setstretch{1.2}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{数据来源}：新浪财经、腾讯财经公开数据
+  \item \textbf{数据存储}：本地SQLite数据库，保护您的隐私
+  \item \textbf{AI模型}：基于规则引擎 + 机器学习（随机森林）
+  \item \textbf{运行环境}：Windows 10/11，需安装 Edge WebView2 运行时
+\end{itemize}
+\end{tcolorbox}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第三部分：AI预测功能说明
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第三部分：AI预测功能说明（实验性功能）}
+
+\begin{tcolorbox}[colback=yellow!10!white,colframe=yellow!70!black,title=\textbf{⚠️ AI预测特别声明},fonttitle=\bfseries\large]
+\setstretch{1.2}
+\textbf{\large 重要提醒：AI预测结果仅供学习参考，不代表投资建议！}
+\begin{itemize}[leftmargin=1.5em]
+  \item 本工具的AI功能基于\textbf{历史数据规律}，但股票市场受政策、突发事件、情绪等多种因素影响
+  \item \textbf{模型准确率有限}，历史回测不代表未来表现
+  \item \textbf{切勿仅凭AI预测进行投资决策}！请结合基本面、消息面综合判断
+  \item 建议将AI预测作为\textbf{众多参考指标之一}，而非唯一依据
+\end{itemize}
+\end{tcolorbox}
+
+\vspace{1em}
+\setstretch{1.3}
+\textbf{AI预测功能采用以下技术：}
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{特征工程}：计算50+维技术指标特征
+  \item \textbf{信号系统}：均线、MACD、RSI、布林带、动量等多维度信号
+  \item \textbf{评分机制}：综合多个信号给出-10到+10的评分
+  \item \textbf{预测结果}：强烈看多、看多、中性偏多、中性偏空、看空、强烈看空
+\end{itemize}
+
+\vspace{1em}
+
+\begin{tcolorbox}[colback=lightbg,colframe=darkwarning,title=\textbf{📊 预测结果解读},fonttitle=\bfseries\large]
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{得分 > 4}：强烈看多 —— 多个技术指标共振看涨
+  \item \textbf{得分 2-4}：看多 —— 偏乐观信号较多
+  \item \textbf{得分 -2 ~ 2}：中性 —— 信号不明确，建议观望
+  \item \textbf{得分 -4 ~ -2}：看空 —— 偏悲观信号较多
+  \item \textbf{得分 < -4}：强烈看空 —— 多个技术指标共振看跌
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{请注意}：以上评分标准基于历史数据统计，\textbf{不代表未来走势}。
+\end{tcolorbox}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第四部分：使用指南（图文版）
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第四部分：使用指南（大字版）}
+
+\setstretch{1.4}
+\large
+
+\textbf{一、启动软件}
+\begin{enumerate}[leftmargin=2em]
+  \item 双击桌面图标，等待3-5秒启动
+  \item 首次使用请先点击\textbf{「开始预加载」}按钮
+  \item 预加载约需5-10分钟（取决于网络速度）
+\end{enumerate}
+
+\vspace{1em}
+\textbf{二、查看股票K线}
+\begin{enumerate}[leftmargin=2em]
+  \item 在左侧输入股票代码（如：000001）
+  \item 点击\textbf{「查看股票」}按钮
+  \item 图表区域将显示K线走势
+  \item 可切换日K/5分钟分时
+\end{enumerate}
+
+\vspace{1em}
+\textbf{三、使用AI预测}
+\begin{enumerate}[leftmargin=2em]
+  \item 点击右上角\textbf{「AI预测」}按钮
+  \item 输入股票代码，点击\textbf{「AI预测」}
+  \item 查看预测结果和各项信号
+\end{enumerate}
+
+\vspace{1em}
+\textbf{四、筛选潜力股}
+\begin{enumerate}[leftmargin=2em]
+  \item 在AI预测模式下，点击\textbf{「开始筛选」}
+  \item 等待筛选完成
+  \item 点击任意股票可直接查看K线图
+\end{enumerate}
+
+\vspace{1em}
+\textbf{五、调整显示}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{字号调整}：右上角小/中/大/特大按钮
+  \item \textbf{列表高度}：拖拽股票列表下方手柄
+  \item \textbf{导出图表}：点击图表区「导出图表」按钮
+\end{enumerate}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第五部分：常见问题
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第五部分：常见问题（FAQ）}
+
+\setstretch{1.3}
+\large
+
+\begin{tcolorbox}[colback=gray!10!white,colframe=gray!70!black,title=\textbf{Q1：预加载要多久？},fonttitle=\bfseries]
+首次使用需要下载全市场约5000只股票的数据，一般需要5-10分钟。请耐心等待，加载完成后会提示。
+\end{tcolorbox}
+
+\vspace{0.8em}
+\begin{tcolorbox}[colback=gray!10!white,colframe=gray!70!black,title=\textbf{Q2：AI预测准吗？},fonttitle=\bfseries]
+\textbf{没有任何预测是100\%准确的}。本工具的AI预测基于历史数据统计，仅供参考学习，\textbf{不能作为投资决策的唯一依据}。
+\end{tcolorbox}
+
+\vspace{0.8em}
+\begin{tcolorbox}[colback=gray!10!white,colframe=gray!70!black,title=\textbf{Q3：数据是实时的吗？},fonttitle=\bfseries]
+数据来自公开网络接口，可能存在15分钟延迟。预加载的数据为收盘后的历史数据。
+\end{tcolorbox}
+
+\vspace{0.8em}
+\begin{tcolorbox}[colback=gray!10!white,colframe=gray!70!black,title=\textbf{Q4：需要联网吗？},fonttitle=\bfseries]
+查看已下载的股票数据时无需联网。首次加载数据、刷新数据时需要联网。
+\end{tcolorbox}
+
+\vspace{0.8em}
+\begin{tcolorbox}[colback=gray!10!white,colframe=gray!70!black,title=\textbf{Q5：我的数据安全吗？},fonttitle=\bfseries]
+所有数据存储在您的电脑本地（文档/StockChart目录），不会上传到任何服务器。
+\end{tcolorbox}
+
+\newpage
+
+% ═══════════════════════════════════════════════════════════════
+% 第六部分：最终免责声明
+% ═══════════════════════════════════════════════════════════════
+\sectitle{第六部分：最终免责声明}
+
+\begin{tcolorbox}[colback=red!2!white,colframe=red!80!black,title=\textbf{🔴 最终声明 · 请务必阅读},fonttitle=\bfseries\Huge]
+\setstretch{1.5}
+\begin{center}
+{\Large\bfseries 请您在使用本工具前，认真阅读以下声明：}
+\end{center}
+
+\vspace{1em}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{本工具仅为个人学习研究之用}，开发者不对任何投资损失承担责任。
+  
+  \item \textbf{股票市场风险极高}，据统计，大部分散户投资者在股市中是亏损的。请\textbf{量力而行，理性投资}。
+  
+  \item \textbf{任何技术指标、AI模型都有其局限性}，不可能预测所有市场情况。请对投资决策负责。
+  
+  \item \textbf{请勿将本工具的预测当做投资建议}。如果您需要专业投资建议，请咨询持牌投资顾问。
+  
+  \item \textbf{未成年人、年长者、风险承受能力较低者}，请在家人指导下使用本工具。
+  
+  \item \textbf{使用本工具即表示您已阅读、理解并接受以上所有条款}。
+  
+  \item \textbf{如不同意以上条款，请立即停止使用本工具}。
+\end{enumerate}
+
+\vspace{1.5em}
+\begin{center}
+{\Large\bfseries\color{warningred} 股市有风险，入市需谨慎}
+
+\vspace{0.5em}
+{\large 投资有风险，决策请自负}
+\end{center}
+\end{tcolorbox}
+
+\vspace{2em}
+\begin{center}
+\rule{0.6\textwidth}{0.5pt}
+
+\vspace{1em}
+{\large \textbf{StockChart 开发团队}}
+
+\vspace{0.3em}
+{\normalsize 版本 V1.0 · 2026年7月}
+
+\vspace{1em}
+{\normalsize 本说明书最终解释权归开发者所有}
+\end{center}
+
+\end{document}
