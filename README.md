@@ -21,6 +21,8 @@ stock-chart-analyzer/
 ├── scripts/     # 构建期/发布期工具（update_lib、publish_update、签名脚本）
 ├── tests/       # pytest 用例
 ├── docs/        # 设计说明、产品说明书
+├── LICENSE      # 项目许可证（GPL-3.0）
+├── THIRD_PARTY_NOTICES.md  # 开源软件声明（第三方组件与许可证）
 ├── requirements.txt
 ├── pyproject.toml
 └── uv.lock
@@ -168,3 +170,11 @@ python scripts/publish_update.py --scp user@<your-server>:/var/www/stockdata/upd
 - 后端已抽取为根目录 `common/` 包，`win7/app.py` 与 `win11/app.py` 只做装配并注册
   `common/routes/` 下的 Blueprint；两个版本各自保留启动器、UI 资源与打包脚本。
 - 本仓库为开源公开仓库，欢迎提交 issue 与 PR。
+
+## 许可证
+
+- 本项目以 **GNU General Public License v3.0（GPL-3.0）** 发布，完整条款见 [LICENSE](LICENSE)。
+- 采用 GPL-3.0 是因为 Win7 版捆绑了以 GPL-3.0 授权的 **PyQt5 / PyQtWebEngine**；
+  若需以非 GPL 方式分发（闭源或商用），须自备 Riverbank 的 PyQt 商业授权。
+- 项目使用的全部第三方开源组件及其许可证（Python 依赖、Win7 桌面壳、前端库、字体、构建工具），
+  统一记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

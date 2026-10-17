@@ -2,6 +2,8 @@
 name = "stockchart"
 version = "1.0.0"
 description = "Stock Chart Analysis Tool"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "flask>=3.0.0",
