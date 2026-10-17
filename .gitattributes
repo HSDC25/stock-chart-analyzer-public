@@ -1,0 +1,57 @@
+# 统一换行与文本/二进制判定
+# 仓库内统一使用 LF 存储；Windows 脚本保留 CRLF 以便直接双击运行。
+
+# 默认：自动识别文本文件，仓库内规范化为 LF
+* text=auto eol=lf
+
+# 文本文件（显式声明，保证跨平台一致）
+*.py      text eol=lf
+*.js      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.json    text eol=lf
+*.toml    text eol=lf
+*.lock    text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.tex     text eol=lf
+*.spec    text eol=lf
+*.gitignore text eol=lf
+
+# Windows 脚本/批处理：检出为 CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# 二进制文件：不做换行转换，不参与文本 diff
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.ttf     binary
+*.otf     binary
+*.woff    binary
+*.woff2   binary
+*.pdf     binary
+*.zip     binary
+*.7z      binary
+*.gz      binary
+*.exe     binary
+*.dll     binary
+*.so      binary
+*.pyd     binary
+*.pyc     binary
+*.pyo      binary
+*.db      binary
+*.sqlite  binary
+*.sqlite3 binary
+
+# 生成物/第三方产物：折叠展示、不计入语言统计
+frontend/vendor/**  linguist-vendored
+frontend/dist/**    linguist-generated
+build/**            linguist-generated
+dist/**             linguist-generated
+*.min.js            linguist-generated -diff
+*.min.css           linguist-generated -diff
+*.lock              linguist-generated -diff
