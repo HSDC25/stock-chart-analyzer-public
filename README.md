@@ -1,5 +1,7 @@
 # stock-chart-analyzer（股票图表分析工具）
 
+**简体中文** | [English](README_EN.md)
+
 A 股股票图表分析工具：基于 **Flask + ECharts** 的 Web 应用，抓取 A 股行情（baostock / 新浪接口），
 渲染 K 线 + 技术指标图表，内置 **AI 预测模块**（`ml_module`）。可打包为 Windows 桌面程序。
 
@@ -22,7 +24,9 @@ stock-chart-analyzer/
 ├── tests/       # pytest 用例
 ├── docs/        # 设计说明、产品说明书
 ├── LICENSE      # 项目许可证（GPL-3.0）
-├── THIRD_PARTY_NOTICES.md  # 开源软件声明（第三方组件与许可证）
+├── README_EN.md                # 英文版 README
+├── THIRD_PARTY_NOTICES.md      # 开源软件声明（中文）
+├── THIRD_PARTY_NOTICES_EN.md   # 开源软件声明（英文）
 ├── requirements.txt
 ├── pyproject.toml
 └── uv.lock
@@ -177,4 +181,5 @@ python scripts/publish_update.py --scp user@<your-server>:/var/www/stockdata/upd
 - 采用 GPL-3.0 是因为 Win7 版捆绑了以 GPL-3.0 授权的 **PyQt5 / PyQtWebEngine**；
   若需以非 GPL 方式分发（闭源或商用），须自备 Riverbank 的 PyQt 商业授权。
 - 项目使用的全部第三方开源组件及其许可证（Python 依赖、Win7 桌面壳、前端库、字体、构建工具），
-  统一记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+  统一记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)（中文）/ [THIRD_PARTY_NOTICES_EN.md](THIRD_PARTY_NOTICES_EN.md)（English）。
+- 英文版说明文档见 [README_EN.md](README_EN.md)。
