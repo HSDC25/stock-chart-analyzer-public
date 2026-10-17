@@ -1,5 +1,7 @@
 # 开源软件声明 / Third-Party Notices
 
+**简体中文** | [English](THIRD_PARTY_NOTICES_EN.md)
+
 本项目「股票图表分析工具」（Stock Chart Analyzer，以下简称"本项目"）在源代码与发行物
 （含使用 PyInstaller 打包的 Windows EXE）中使用了下列第三方开源组件。
 各组件的版权归其各自作者所有，并按各自的许可证条款授权使用。
