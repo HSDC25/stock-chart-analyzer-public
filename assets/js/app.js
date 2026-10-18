@@ -1,7 +1,7 @@
-// StockChart 前端应用（win11 四主题共享）
-// 注意：本文件在 dark/minimalist/highend/brutalist 四个主题下是逐字节相同的
-// 拷贝——修改任何逻辑必须改 dark 这份后复制到其余三份，主题视觉差异一律
-// 通过各主题 style.css 里的 CSS 变量（--chart-* 等）表达，不要写死在本文件。
+// StockChart 前端应用（win7 与 win11 四个主题共用的唯一一份）
+// 注意：本文件是全部 5 个界面（win7 + dark/minimalist/highend/brutalist）唯一
+// 的逻辑来源，由 /assets/js/app.js 路由提供；主题视觉差异一律通过各主题
+// style.css 里的 CSS 变量（--chart-* 等）表达，不要写死在本文件。
 // 交互概览：指标筛选 / 排行榜 / 代码输入 / 技术分析 四种模式，
 // 双击表格行打开 K 线图，图表配色在渲染时读取 CSS 变量自动适配主题。
 // CSRF：所有 POST 必须带 X-CSRF-Token（ensureCsrfToken 自动处理）。
@@ -11,16 +11,79 @@ let _mlScreenPollSeq = 0; // ML 筛选轮询序号：丢弃旧轮询
 let _rowOpenTimer = null; // 单击代码格延迟打开定时器（与双击区分）
 let _preloadCompleted = false;
 let _preloadRunning = false;
-let _waitingForClose = false;
 let _loadSeq = 0; // K线加载请求序号：丢弃过期响应
 let _rankSeq = 0; // 排行榜请求序号：丢弃过期响应
 var _chartResizeTimer = null; // 图表延迟 resize 定时器
+var _xlsxPromise = null; // SheetJS 懒加载句柄（导出时才下载，首屏不需要）
+
+// 表格状态：渲染函数只写 data/isRank/title/changeField/total，
+// 排序三态（sortField/sortState）由 sortTable 独占，避免渲染互相覆盖
+var tableState = {
+ data: [],
+ isRank: false,
+ title: '',
+ changeField: 'three_day_change',
+ total: 0,
+ sortField: '',
+ sortState: 0 // 0=默认 1=升序 2=降序
+};
 
 // HTML 转义：所有拼进 innerHTML 的动态字符串必须先经过此函数
 function escapeHtml(s) {
  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
   return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 数值格式化：接口回传的字段可能是字符串/空值/NaN，统一在这里兜底，
+// 避免任何地方直接 .toFixed() 抛 "toFixed is not a function"
+// ─────────────────────────────────────────────────────────────
+function _toFiniteNumber(v) {
+ if (v == null || v === '') return null;
+ var n = typeof v === 'number' ? v : Number(v);
+ return isFinite(n) ? n : null;
+}
+
+// 纯数字：非法值返回 '-'
+function fmtNum(v, digits) {
+ var n = _toFiniteNumber(v);
+ return n == null ? '-' : n.toFixed(digits == null ? 2 : digits);
+}
+
+// 百分比：正数补 '+'，非法值返回 '-'
+function fmtPct(v, digits) {
+ var n = _toFiniteNumber(v);
+ if (n == null) return '-';
+ return (n > 0 ? '+' : '') + n.toFixed(digits == null ? 2 : digits) + '%';
+}
+
+// 进度条：把 aria-valuenow 写到带 role="progressbar" 的容器上（不是内层填充条）
+function setProgress(fillEl, pct) {
+ if (!fillEl) return;
+ fillEl.style.width = pct + '%';
+ var track = fillEl.parentElement;
+ if (track && track.getAttribute('role') === 'progressbar') {
+  track.setAttribute('aria-valuenow', String(pct));
+ }
+}
+
+// SheetJS 懒加载：首屏不再下载 930KB 的 xlsx.full.min.js，点导出时才取
+function loadXlsx() {
+ if (typeof XLSX !== 'undefined') return Promise.resolve(XLSX);
+ if (!_xlsxPromise) {
+  _xlsxPromise = new Promise(function(resolve, reject) {
+   var s = document.createElement('script');
+   s.src = '/assets/js/vendor/xlsx.full.min.js';
+   s.onload = function() {
+    if (typeof XLSX === 'undefined') reject(new Error('导出组件初始化失败'));
+    else resolve(XLSX);
+   };
+   s.onerror = function() { reject(new Error('导出组件加载失败')); };
+   document.head.appendChild(s);
+  });
+ }
+ return _xlsxPromise;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -57,6 +120,16 @@ document.addEventListener('DOMContentLoaded', function() {
  startRealtimeClock();
  // CSRF 预热：页面加载即取回 token，避免首次 POST 时阻塞
  ensureCsrfToken();
+
+ // 窗口尺寸变化：统一重算当前 K 线图（用 addEventListener，多个监听不会互相覆盖）
+ var _winResizeTimer = null;
+ window.addEventListener('resize', function() {
+  if (_winResizeTimer) clearTimeout(_winResizeTimer);
+  _winResizeTimer = setTimeout(function() {
+   _winResizeTimer = null;
+   if (window._currentChart) window._currentChart.resize();
+  }, 120);
+ });
 
  // 事件委托：双击表格行打开 K 线图
  document.getElementById('stockListBody').addEventListener('dblclick', function(e) {
@@ -231,10 +304,9 @@ async function refreshDataStatus() {
   // 数据新鲜且无预加载运行：已就绪
   if (data.latest_date && data.stock_count >= 100 && data.fresh) {
    _preloadCompleted = true;
-   bar.style.width = '100%';
-   bar.setAttribute('aria-valuenow', '100');
+   setProgress(bar, 100);
    percent.textContent = '100%';
-   detail.innerHTML = ' 数据已是最新<br><small>' + data.latest_date + ' | ' + data.stock_count + ' 只股票</small>';
+   detail.innerHTML = ' 数据已是最新<br><small>' + escapeHtml(data.latest_date) + ' | ' + escapeHtml(data.stock_count) + ' 只股票</small>';
    count.textContent = '';
    btn.textContent = ' 已就绪，点击重新加载';
    btn.disabled = false;
@@ -243,10 +315,9 @@ async function refreshDataStatus() {
    // 有数据但非最新：等待收盘或等待云端更新，可手动重新加载（不自动发请求）
    var dot = document.getElementById('statusDot');
    var marketClosed = dot && dot.classList.contains('closed');
-   detail.innerHTML = ' <b>数据非最新</b><br><small>数据日期: ' + data.latest_date +
+   detail.innerHTML = ' <b>数据非最新</b><br><small>数据日期: ' + escapeHtml(data.latest_date) +
     (marketClosed ? '<br>已收盘，可点击下方按钮重新加载' : '<br>等待收盘后更新') + '</small>';
-   bar.style.width = '50%';
-   bar.setAttribute('aria-valuenow', '50');
+   setProgress(bar, 50);
    percent.textContent = '等待';
    btn.textContent = ' 点击重新加载';
    btn.disabled = false;
@@ -255,8 +326,7 @@ async function refreshDataStatus() {
    detail.textContent = '暂无数据，点击加载';
    btn.textContent = '开始加载';
    btn.disabled = false;
-   bar.style.width = '0%';
-   bar.setAttribute('aria-valuenow', '0');
+   setProgress(bar, 0);
   }
  } catch (e) {
   console.error('数据状态获取失败:', e);
@@ -351,27 +421,21 @@ function updatePreloadUI(data) {
  return;
  }
 
- // 等待收盘状态，忽略所有轮询更新
- if (_waitingForClose && !running) {
- return;
- }
+  const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+  setProgress(bar, pct);
 
- const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
- bar.setAttribute('aria-valuenow', String(pct));
-
- if (running) {
- bar.style.width = pct + '%';
- bar.className = 'progress-fill active';
+  if (running) {
+   bar.className = 'progress-fill active';
  percent.textContent = pct + '%';
  btn.textContent = '加载中...';
  btn.disabled = true;
  detail.textContent = data.message || '加载中...';
- } else if (loaded > 0 && loaded >= total && total > 0) {
- _preloadCompleted = true;
- bar.style.width = '100%';
- bar.className = 'progress-fill';
- percent.textContent = '100%';
- detail.innerHTML = ' <b>加载完成</b><br><small>' + loaded + ' 只股票</small>';
+  } else if (loaded > 0 && loaded >= total && total > 0) {
+   _preloadCompleted = true;
+   setProgress(bar, 100);
+   bar.className = 'progress-fill';
+   percent.textContent = '100%';
+   detail.innerHTML = ' <b>加载完成</b><br><small>' + escapeHtml(loaded) + ' 只股票</small>';
  count.textContent = '';
  btn.textContent = ' 已就绪，点击重新加载';
  btn.disabled = false;
@@ -390,11 +454,11 @@ function getValue(id) {
  return el && el.value ? parseFloat(el.value) : null;
 }
 
-// 获取代码列表
-function getCodes() {
- const el = document.getElementById('codesInput');
+// 获取代码列表（inputId 缺省为 #codesInput；支持半/全角逗号、空格、分号分隔）
+function getCodes(inputId) {
+ const el = document.getElementById(inputId || 'codesInput');
  if (!el || !el.value) return null;
- return el.value.split(',').map(function(c) { return c.trim(); }).filter(function(c) { return c; });
+ return el.value.split(/[,，;；\s]+/).map(function(c) { return c.trim(); }).filter(function(c) { return c; });
 }
 
 // 搜索股票
@@ -477,72 +541,73 @@ function updateCountBadge(total, shown) {
  }
 }
 
-function renderStockList(stocks, total) {
+function renderStockList(stocks, total, resetSort) {
  const tbody = document.getElementById('stockListBody');
- const countEl = document.getElementById('stockCount');
 
- // 缓存数据供列排序使用
- window._currentTableData = stocks || [];
- window._currentTableIsRank = false;
- window._currentTableChangeField = 'three_day_change';
- window._currentTableTotal = total || 0;
- // 重置排序状态与箭头
- _currentSortField = '';
- _currentSortState = 0;
- document.querySelectorAll('.sort-arrow').forEach(function(el) { el.className = 'sort-arrow'; });
+ // 记录数据快照；渲染函数只写数据字段，排序三态由 sortTable 独占
+ tableState.data = stocks || [];
+ tableState.isRank = false;
+ tableState.title = '';
+ tableState.changeField = 'three_day_change';
+ tableState.total = total || 0;
+ // 仅服务端下发的新结果才重置排序；sortTable 重渲染时传 false 保留排序态
+ if (resetSort !== false) {
+  tableState.sortField = '';
+  tableState.sortState = 0;
+  updateSortArrows();
+ }
 
  if (!stocks || stocks.length === 0) {
- updateCountBadge(total || 0, 0);
- tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#999;padding:40px;">没有符合条件的股票</td></tr>';
- return;
+  updateCountBadge(total || 0, 0);
+  tbody.innerHTML = '<tr><td colspan="10" class="table-empty">没有符合条件的股票</td></tr>';
+  return;
  }
 
  updateCountBadge(total, stocks.length);
 
  tbody.innerHTML = stocks.map(function(stock, i) {
- const changeClass = stock.change_pct > 0 ? 'change-up' : (stock.change_pct < 0 ? 'change-down' : '');
- const t3Class = stock.three_day_change > 0 ? 'change-up' : (stock.three_day_change < 0 ? 'change-down' : '');
- return '<tr data-code="' + escapeHtml(stock.code) + '" tabindex="0" style="cursor:pointer;">' +
- '<td>' + (i + 1) + '</td>' +
- '<td class="stock-code">' + escapeHtml(stock.code) + '</td>' +
- '<td class="stock-name">' + escapeHtml(stock.name) + '</td>' +
- '<td class="text-right">' + (stock.price != null ? stock.price.toFixed(2) : '-') + '</td>' +
- '<td class="text-right ' + changeClass + '">' + (stock.change_pct != null ? (stock.change_pct > 0 ? '+' : '') + stock.change_pct.toFixed(2) + '%' : '-') + '</td>' +
- '<td class="text-right ' + t3Class + '">' + (stock.three_day_change != null ? (stock.three_day_change > 0 ? '+' : '') + stock.three_day_change.toFixed(2) + '%' : '-') + '</td>' +
- '<td class="text-right">' + (stock.volume_change_pct != null ? stock.volume_change_pct.toFixed(2) + '%' : '-') + '</td>' +
- '<td class="text-right">' + (stock.pe != null ? stock.pe.toFixed(2) : '-') + '</td>' +
- '<td class="text-right">' + (stock.pb != null ? stock.pb.toFixed(2) : '-') + '</td>' +
- '<td class="text-right">' + (stock.market_cap != null ? stock.market_cap.toFixed(0) : '-') + '</td>' +
- '</tr>';
+  const changeClass = stock.change_pct > 0 ? 'change-up' : (stock.change_pct < 0 ? 'change-down' : '');
+  const t3Class = stock.three_day_change > 0 ? 'change-up' : (stock.three_day_change < 0 ? 'change-down' : '');
+  return '<tr data-code="' + escapeHtml(stock.code) + '" tabindex="0" style="cursor:pointer;">' +
+  '<td>' + (i + 1) + '</td>' +
+  '<td class="stock-code">' + escapeHtml(stock.code) + '</td>' +
+  '<td class="stock-name">' + escapeHtml(stock.name) + '</td>' +
+  '<td class="text-right">' + fmtNum(stock.price, 2) + '</td>' +
+  '<td class="text-right ' + changeClass + '">' + fmtPct(stock.change_pct) + '</td>' +
+  '<td class="text-right ' + t3Class + '">' + fmtPct(stock.three_day_change) + '</td>' +
+  '<td class="text-right">' + fmtPct(stock.volume_change_pct) + '</td>' +
+  '<td class="text-right">' + fmtNum(stock.pe, 2) + '</td>' +
+  '<td class="text-right">' + fmtNum(stock.pb, 2) + '</td>' +
+  '<td class="text-right">' + fmtNum(stock.market_cap, 0) + '</td>' +
+  '</tr>';
  }).join('');
 }
 
 // ─────────────────────────────────────────────────────────────
 // 表格列排序：点击表头在 默认排序 → 升序 → 降序 之间循环
+// 排序状态统一存放在 tableState.sortField / tableState.sortState，
+// 渲染函数不再回写排序态，因此连续点击表头不会丢失当前排序。
 // ─────────────────────────────────────────────────────────────
-var _currentSortField = '';
-var _currentSortState = 0; // 0=默认 1=升序 2=降序
-
 function sortTable(field) {
- if (!window._currentTableData || !window._currentTableData.length) return;
+ if (!tableState.data || !tableState.data.length) return;
 
  // 三态循环：默认 → 升序 → 降序 → 默认
- if (_currentSortField === field) {
-  _currentSortState = (_currentSortState + 1) % 3;
+ if (tableState.sortField === field) {
+  tableState.sortState = (tableState.sortState + 1) % 3;
  } else {
-  _currentSortField = field;
-  _currentSortState = 1; // 新列首次点击默认升序
+  tableState.sortField = field;
+  tableState.sortState = 1; // 新列首次点击默认升序
  }
 
  // 第6列（N日涨幅）在不同榜单/模式下实际字段名不同
  var actualField = field;
  if (field === 'n_day_change') {
-  actualField = window._currentTableChangeField || 'three_day_change';
+  actualField = tableState.changeField || 'three_day_change';
  }
 
- var data = window._currentTableData.slice();
- if (_currentSortState === 1 || _currentSortState === 2) {
-  var dir = _currentSortState === 1 ? 1 : -1;
+ var data = tableState.data.slice();
+ if (tableState.sortState === 1 || tableState.sortState === 2) {
+  var dir = tableState.sortState === 1 ? 1 : -1;
   data.sort(function(a, b) {
    var va = a[actualField], vb = b[actualField];
    if (va == null || va === '') va = -Infinity;
@@ -552,23 +617,26 @@ function sortTable(field) {
   });
  }
 
- // 重新渲染（渲染函数内部会重置排序状态，这里先记录再恢复）
- var savedField = _currentSortField;
- var savedState = _currentSortState;
- var isRank = window._currentTableIsRank;
- if (isRank) {
-  renderRankTable(data, window._currentTableTitle || '', window._currentTableChangeField || '');
+ // 重新渲染（resetSort=false 保留本次排序状态）
+ if (tableState.isRank) {
+  renderRankTable(data, tableState.title || '', tableState.changeField || '', false);
  } else {
-  renderStockList(data, window._currentTableTotal || data.length);
+  renderStockList(data, tableState.total || data.length, false);
  }
- _currentSortField = savedField;
- _currentSortState = savedState;
 
- // 更新箭头
+ updateSortArrows();
+}
+
+// 刷新表头的排序箭头与 aria-sort（无障碍：屏幕阅读器可读出当前排序列）
+function updateSortArrows() {
  document.querySelectorAll('.sort-arrow').forEach(function(el) { el.className = 'sort-arrow'; });
- var arrow = document.getElementById('sort_' + field);
- if (arrow) {
-  arrow.className = 'sort-arrow ' + (_currentSortState === 1 ? 'active-asc' : (_currentSortState === 2 ? 'active-desc' : ''));
+ document.querySelectorAll('.stock-table thead th').forEach(function(th) { th.removeAttribute('aria-sort'); });
+ var arrow = document.getElementById('sort_' + tableState.sortField);
+ if (!arrow) return;
+ arrow.className = 'sort-arrow ' + (tableState.sortState === 1 ? 'active-asc' : (tableState.sortState === 2 ? 'active-desc' : ''));
+ var th = arrow.closest('th');
+ if (th && tableState.sortState !== 0) {
+  th.setAttribute('aria-sort', tableState.sortState === 1 ? 'ascending' : 'descending');
  }
 }
 
@@ -603,17 +671,21 @@ async function loadStockByCode(code) {
  document.getElementById('chartTitle').textContent = code + ' ' + (data.stock.name || '') + titleSuffix;
  renderChart(data.data, code, data.stock.name || '');
  } else {
- document.getElementById('chartContainer').innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100%;color:#999;">加载失败: ' + escapeHtml(data.error) + '</div>';
+ document.getElementById('chartContainer').innerHTML = '<div class="chart-msg">加载失败: ' + escapeHtml(data.error) + '</div>';
  }
  } catch (e) {
  if (seq !== _loadSeq) return; // 过期响应，丢弃
- document.getElementById('chartContainer').innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100%;color:#999;">请求失败: ' + escapeHtml(e.message) + '</div>';
+ document.getElementById('chartContainer').innerHTML = '<div class="chart-msg">请求失败: ' + escapeHtml(e.message) + '</div>';
  }
 }
 
-// 关闭 K 线面板
+// 关闭 K 线面板（同时释放 ECharts 实例，避免面板隐藏后仍占用内存与监听器）
 function closeChartPanel() {
  document.getElementById('chartPanel').style.display = 'none';
+ if (window._currentChart) {
+  try { window._currentChart.dispose(); } catch (e) { /* 忽略释放异常 */ }
+  window._currentChart = null;
+ }
 }
 
 // K线图面板：上下拖动调整高度（占屏幕比例）
@@ -650,7 +722,7 @@ function initChartDrag() {
 function renderChart(data, code, name) {
  // ECharts 未加载守卫（defer 加载失败时给出提示而不是抛异常）
  if (typeof echarts === 'undefined') {
- document.getElementById('chartContainer').innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100%;color:#999;">图表组件未加载，请刷新页面重试</div>';
+ document.getElementById('chartContainer').innerHTML = '<div class="chart-msg">图表组件未加载，请刷新页面重试</div>';
  return;
  }
 
@@ -837,9 +909,8 @@ function renderChart(data, code, name) {
  // 延迟 resize，确保面板 flex 布局稳定后图表尺寸正确（定时器可被下次渲染取消）
  _chartResizeTimer = setTimeout(function() { chart.resize(); }, 100);
 
- // 记录当前实例，供下次渲染前 dispose
+ // 记录当前实例：窗口 resize 由全局监听统一处理（不再覆写 window.onresize）
  window._currentChart = chart;
- window.onresize = function() { chart.resize(); };
 }
 
 // 根据标题识别榜单类型（供 TXT/Excel 导出与文件名使用）
@@ -863,15 +934,17 @@ function getRankingType(title) {
 
 // 导出当前榜单为 Excel (.xlsx) 文件
 async function exportToExcel() {
- // XLSX 组件未加载守卫
- if (typeof XLSX === 'undefined') {
- alert('导出组件未加载');
- return;
+ // 懒加载 SheetJS（约 930KB，仅在导出时下载，不拖慢首屏）
+ try {
+  await loadXlsx();
+ } catch (e) {
+  alert('导出组件加载失败，请检查网络后重试');
+  return;
  }
 
- if (!window._currentTableData || window._currentTableData.length === 0) {
- alert('没有数据可导出');
- return;
+ if (!tableState.data || tableState.data.length === 0) {
+  alert('没有数据可导出');
+  return;
  }
 
  var title = document.getElementById('resultTitle').textContent;
@@ -954,7 +1027,7 @@ async function exportToExcel() {
 
 // 导出当前榜单为 TXT 文件
 async function exportToTxt() {
- if (!window._currentTableData || window._currentTableData.length === 0) {
+ if (!tableState.data || tableState.data.length === 0) {
  alert('没有数据可导出');
  return;
  }
@@ -1032,9 +1105,9 @@ async function exportToTxt() {
  URL.revokeObjectURL(url);
 }
 
-// 技术分析预测
+// 技术分析预测（优先读取技术分析面板专属的 #mlCodeInput，回退到 #codesInput）
 async function predictStock() {
- const codes = getCodes();
+ const codes = getCodes('mlCodeInput') || getCodes('codesInput');
  const code = codes ? codes[0] : '';
  if (!code) {
  alert('请先输入股票代码');
@@ -1051,10 +1124,10 @@ async function predictStock() {
  if (data.success) {
  renderAnalysisResult(data);
  } else {
- resultDiv.innerHTML = '<p style="color:red;">分析失败: ' + escapeHtml(data.error || '未知错误') + '</p>';
+ resultDiv.innerHTML = '<p class="msg-error">分析失败: ' + escapeHtml(data.error || '未知错误') + '</p>';
  }
  } catch (e) {
- resultDiv.innerHTML = '<p style="color:red;">请求失败: ' + escapeHtml(e.message) + '</p>';
+ resultDiv.innerHTML = '<p class="msg-error">请求失败: ' + escapeHtml(e.message) + '</p>';
  }
 }
 
@@ -1108,7 +1181,7 @@ function renderMLScreenData(list) {
  });
  resultDiv.innerHTML = html;
  } else {
- resultDiv.innerHTML = '<p style="color:#999;">没有找到符合条件的股票</p>';
+ resultDiv.innerHTML = '<p class="muted-text">没有找到符合条件的股票</p>';
  }
 }
 
@@ -1131,19 +1204,24 @@ async function runMLScreen() {
  const start = await resp.json();
  if (seq !== _mlScreenPollSeq) return;
  if (!resp.ok || !start.success) {
-  resultDiv.innerHTML = '<p style="color:red;">' + escapeHtml(start.error || ('启动失败 (HTTP ' + resp.status + ')')) + '</p>';
+  resultDiv.innerHTML = '<p class="msg-error">' + escapeHtml(start.error || ('启动失败 (HTTP ' + resp.status + ')')) + '</p>';
   return;
  }
 
- // 轮询进度
+ // 轮询进度（最长 5 分钟；超时主动放弃，避免无限轮询）
+ const pollDeadline = Date.now() + 5 * 60 * 1000;
  while (true) {
   await new Promise(function(resolve) { setTimeout(resolve, 800); });
   if (seq !== _mlScreenPollSeq) return; // 旧轮询，丢弃
+  if (Date.now() > pollDeadline) {
+   resultDiv.innerHTML = '<p class="msg-error">筛选超时（超过 5 分钟），请稍后重试</p>';
+   return;
+  }
   const stResp = await fetch('/api/ml/screen/status?job_id=' + encodeURIComponent(start.job_id));
   const st = await stResp.json();
   if (seq !== _mlScreenPollSeq) return;
   if (!st.success) {
-   resultDiv.innerHTML = '<p style="color:red;">' + escapeHtml(st.error || '状态查询失败') + '</p>';
+   resultDiv.innerHTML = '<p class="msg-error">' + escapeHtml(st.error || '状态查询失败') + '</p>';
    return;
   }
   if (st.status === 'running') {
@@ -1152,7 +1230,7 @@ async function runMLScreen() {
    continue;
   }
   if (st.status === 'error') {
-   resultDiv.innerHTML = '<p style="color:red;">筛选失败: ' + escapeHtml(st.error || '未知错误') + '</p>';
+   resultDiv.innerHTML = '<p class="msg-error">筛选失败: ' + escapeHtml(st.error || '未知错误') + '</p>';
    return;
   }
   // done：渲染结果
@@ -1161,7 +1239,7 @@ async function runMLScreen() {
  }
  } catch (e) {
  if (seq === _mlScreenPollSeq) {
-  resultDiv.innerHTML = '<p style="color:red;">筛选失败: ' + escapeHtml(e.message) + '</p>';
+  resultDiv.innerHTML = '<p class="msg-error">筛选失败: ' + escapeHtml(e.message) + '</p>';
  }
  } finally {
  // 仅当仍是最新一次点击时才恢复按钮（旧轮询不抢按钮状态）
@@ -1172,52 +1250,73 @@ async function runMLScreen() {
  }
 }
 
-// 重置筛选
+// 重置筛选（同时清空表格快照与排序状态）
 function resetFilters() {
  document.querySelectorAll('.sidebar input').forEach(function(input) {
- input.value = '';
+  input.value = '';
  });
  const sortEl = document.getElementById('sortOrder');
  if (sortEl) sortEl.value = 'default';
  const tbody = document.getElementById('stockListBody');
- tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#999;padding:40px;">请选择模式并加载数据</td></tr>';
+ tbody.innerHTML = '<tr><td colspan="10" class="table-empty">请选择模式并加载数据</td></tr>';
  document.getElementById('stockCount').textContent = '等待筛选';
- window._currentTableData = [];
+ tableState.data = [];
+ tableState.isRank = false;
+ tableState.title = '';
+ tableState.total = 0;
+ tableState.sortField = '';
+ tableState.sortState = 0;
+ updateSortArrows();
 }
 
 
 
 // ═══ 排行榜功能 ═══
 
-// 排行榜通用：带按钮加载态与请求序号的 fetch
+// 排行榜通用：带加载态、请求序号与状态提示的 fetch
+// btn 允许是 <button>（切换文字）或 <select>（仅置灰），都会在请求期间禁用
 function fetchRankingWithState(url, btn, onSuccess) {
  var seq = ++_rankSeq;
- var originalText = btn ? btn.textContent : '';
+ var isButton = !!btn && btn.tagName === 'BUTTON';
+ var originalText = isButton ? btn.textContent : '';
  if (btn) {
- btn.textContent = '分析中...';
- btn.disabled = true;
+  if (isButton) btn.textContent = '分析中...';
+  btn.disabled = true;
  }
+ setRankStatus('分析中...');
  fetch(url)
  .then(function(r) { return r.json(); })
  .then(function(data) {
- if (seq !== _rankSeq) return; // 过期响应，丢弃
- if (data.success) {
- window._lastRankTotal = data.total || (data.data ? data.data.length : 0);
- onSuccess(data);
- } else {
- alert('加载失败: ' + (data.error || '未知错误'));
- }
+  if (seq !== _rankSeq) return; // 过期响应，丢弃
+  if (data.success) {
+   window._lastRankTotal = data.total || (data.data ? data.data.length : 0);
+   onSuccess(data);
+   setRankStatus('');
+  } else {
+   var msg = data.error || '未知错误';
+   setRankStatus('加载失败: ' + msg);
+   alert('加载失败: ' + msg);
+  }
  })
  .catch(function(e) {
- if (seq !== _rankSeq) return;
- alert('请求失败: ' + e.message);
+  if (seq !== _rankSeq) return;
+  setRankStatus('请求失败: ' + e.message);
+  alert('请求失败: ' + e.message);
  })
  .finally(function() {
- if (btn) {
- btn.textContent = originalText;
- btn.disabled = false;
- }
+  if (btn) {
+   if (isButton) btn.textContent = originalText;
+   btn.disabled = false;
+  }
  });
+}
+
+// 高级筛选下拉的进度/错误提示（这些榜单没有独立按钮，靠这一行给出反馈）
+function setRankStatus(msg) {
+ var el = document.getElementById('rankScreenStatus');
+ if (!el) return;
+ el.textContent = msg || '';
+ el.hidden = !msg;
 }
 
 // 加载三日涨幅前50
@@ -1274,21 +1373,22 @@ async function loadCustomRank() {
 }
 
 // 渲染排行榜表格
-function renderRankTable(stocks, title, changeField) {
+function renderRankTable(stocks, title, changeField, resetSort) {
  var tbody = document.getElementById('stockListBody');
  var resultTitle = document.getElementById('resultTitle');
- var countEl = document.getElementById('stockCount');
 
- // 缓存数据供列排序使用
- window._currentTableData = stocks || [];
- window._currentTableIsRank = true;
- window._currentTableTitle = title;
- window._currentTableChangeField = changeField;
- window._currentTableTotal = stocks ? stocks.length : 0;
- // 重置排序状态与箭头
- _currentSortField = '';
- _currentSortState = 0;
- document.querySelectorAll('.sort-arrow').forEach(function(el) { el.className = 'sort-arrow'; });
+ // 记录数据快照；渲染函数只写数据字段，排序三态由 sortTable 独占
+ tableState.data = stocks || [];
+ tableState.isRank = true;
+ tableState.title = title;
+ tableState.changeField = changeField;
+ tableState.total = stocks ? stocks.length : 0;
+ // 仅服务端下发的新榜单才重置排序；sortTable 重渲染时传 false 保留排序态
+ if (resetSort !== false) {
+  tableState.sortField = '';
+  tableState.sortState = 0;
+  updateSortArrows();
+ }
 
  resultTitle.textContent = title;
  updateCountBadge(window._lastRankTotal || (stocks ? stocks.length : 0), stocks ? stocks.length : 0);
@@ -1296,85 +1396,81 @@ function renderRankTable(stocks, title, changeField) {
  // 动态更新表头第6列（保留排序箭头）
  var th6 = document.querySelectorAll('.stock-table thead th');
  if (th6.length >= 6) {
- var label = 'N日涨幅';
- if (title.indexOf('三日') >= 0) label = '3日涨幅';
- else if (title.indexOf('五日') >= 0) label = '5日涨幅';
- else if (title.indexOf('月度') >= 0) label = '月度涨幅';
- else if (title.indexOf('自定义') >= 0) label = '涨跌幅';
- else if (title.indexOf('放量') >= 0) label = '换手率';
- else if (title.indexOf('强势精选') >= 0) label = '大涨天数';
- else if (title.indexOf('涨停天数排行') >= 0) label = '涨停天数';
- else if (title.indexOf('天数排行') >= 0) label = '大涨天数';
- th6[5].innerHTML = label + ' <span class="sort-arrow" id="sort_n_day_change"></span>';
- if (th6.length >= 7 && (title.indexOf('天数排行') >= 0 || title.indexOf('强势精选') >= 0)) {
- th6[6].innerHTML = (title.indexOf('涨停天数排行') >= 0 ? '大涨天数' : '占比') + ' <span class="sort-arrow" id="sort_volume_change_pct"></span>';
- }
+  var label = 'N日涨幅';
+  if (title.indexOf('三日') >= 0) label = '3日涨幅';
+  else if (title.indexOf('五日') >= 0) label = '5日涨幅';
+  else if (title.indexOf('月度') >= 0) label = '月度涨幅';
+  else if (title.indexOf('自定义') >= 0) label = '涨跌幅';
+  else if (title.indexOf('放量') >= 0) label = '换手率';
+  else if (title.indexOf('强势精选') >= 0) label = '大涨天数';
+  else if (title.indexOf('涨停天数排行') >= 0) label = '涨停天数';
+  else if (title.indexOf('天数排行') >= 0) label = '大涨天数';
+  th6[5].innerHTML = label + ' <span class="sort-arrow" id="sort_n_day_change"></span>';
+  if (th6.length >= 7 && (title.indexOf('天数排行') >= 0 || title.indexOf('强势精选') >= 0)) {
+   th6[6].innerHTML = (title.indexOf('涨停天数排行') >= 0 ? '大涨天数' : '占比') + ' <span class="sort-arrow" id="sort_volume_change_pct"></span>';
+  }
  }
 
  if (!stocks || stocks.length === 0) {
- updateCountBadge(window._lastRankTotal || 0, 0);
- tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#999;padding:40px;">无数据</td></tr>';
- return;
+  updateCountBadge(window._lastRankTotal || 0, 0);
+  tbody.innerHTML = '<tr><td colspan="10" class="table-empty">无数据</td></tr>';
+  return;
  }
 
  updateCountBadge(window._lastRankTotal || stocks.length, stocks.length);
 
  tbody.innerHTML = stocks.map(function(s, i) {
- var changeClass = s.change_pct > 0 ? 'change-up' : (s.change_pct < 0 ? 'change-down' : '');
- // 支持 n_day_change / three_day_change / five_day_change / monthly_change
- var extraVal = null;
- if (changeField && s[changeField] != null) {
- extraVal = s[changeField];
- } else {
- extraVal = s.monthly_change != null ? s.monthly_change :
- (s.five_day_change != null ? s.five_day_change :
- (s.three_day_change != null ? s.three_day_change : null));
- }
- var extraChangeClass = extraVal > 0 ? 'change-up' : (extraVal < 0 ? 'change-down' : '');
- var isBigUpDays = changeField === 'big_up_days' || changeField === 'limit_up_days';
- var isLimitUpRank = changeField === 'limit_up_days';
- var mcap = s.market_cap != null ? (typeof s.market_cap === 'number' ? s.market_cap.toFixed(0) : String(s.market_cap)) : '-';
- return '<tr data-code="' + escapeHtml(s.code) + '" tabindex="0" style="cursor:pointer;">' +
- '<td>' + (i + 1) + '</td>' +
- '<td class="stock-code">' + escapeHtml(s.code) + '</td>' +
- '<td class="stock-name">' + escapeHtml(s.name) + '</td>' +
- '<td class="text-right">' + (s.price != null ? s.price.toFixed(2) : '-') + '</td>' +
- '<td class="text-right ' + changeClass + '">' + (s.change_pct != null ? (s.change_pct > 0 ? '+' : '') + s.change_pct.toFixed(2) + '%' : '-') + '</td>' +
- '<td class="text-right ' + (isBigUpDays ? '' : extraChangeClass) + '">' + (isBigUpDays ? (extraVal != null ? extraVal + '天' : '-') : (extraVal != null ? (extraVal > 0 ? '+' : '') + extraVal.toFixed(2) + '%' : '-')) + '</td>' +
- '<td class="text-right">' + (isLimitUpRank ? (s.big_up_days != null ? s.big_up_days + '天' : '-') : (isBigUpDays && s.big_up_ratio != null ? s.big_up_ratio.toFixed(1) + '%' : '-')) + '</td>' +
- '<td class="text-right">' + (s.pe != null ? s.pe.toFixed(1) : '-') + '</td>' +
- '<td class="text-right">' + (s.pb != null ? s.pb.toFixed(2) : '-') + '</td>' +
- '<td class="text-right">' + escapeHtml(mcap) + '</td>' +
- '</tr>';
+  var changeClass = s.change_pct > 0 ? 'change-up' : (s.change_pct < 0 ? 'change-down' : '');
+  // 支持 n_day_change / three_day_change / five_day_change / monthly_change
+  var extraVal = null;
+  if (changeField && s[changeField] != null) {
+   extraVal = s[changeField];
+  } else {
+   extraVal = s.monthly_change != null ? s.monthly_change :
+   (s.five_day_change != null ? s.five_day_change :
+   (s.three_day_change != null ? s.three_day_change : null));
+  }
+  var extraChangeClass = extraVal > 0 ? 'change-up' : (extraVal < 0 ? 'change-down' : '');
+  var isBigUpDays = changeField === 'big_up_days' || changeField === 'limit_up_days';
+  var isLimitUpRank = changeField === 'limit_up_days';
+  return '<tr data-code="' + escapeHtml(s.code) + '" tabindex="0" style="cursor:pointer;">' +
+  '<td>' + (i + 1) + '</td>' +
+  '<td class="stock-code">' + escapeHtml(s.code) + '</td>' +
+  '<td class="stock-name">' + escapeHtml(s.name) + '</td>' +
+  '<td class="text-right">' + fmtNum(s.price, 2) + '</td>' +
+  '<td class="text-right ' + changeClass + '">' + fmtPct(s.change_pct) + '</td>' +
+  '<td class="text-right ' + (isBigUpDays ? '' : extraChangeClass) + '">' + (isBigUpDays ? (extraVal != null ? fmtNum(extraVal, 0) + '天' : '-') : fmtPct(extraVal)) + '</td>' +
+  '<td class="text-right">' + (isLimitUpRank ? (s.big_up_days != null ? fmtNum(s.big_up_days, 0) + '天' : '-') : (isBigUpDays && s.big_up_ratio != null ? fmtNum(s.big_up_ratio, 1) + '%' : '-')) + '</td>' +
+  '<td class="text-right">' + fmtNum(s.pe, 1) + '</td>' +
+  '<td class="text-right">' + fmtNum(s.pb, 2) + '</td>' +
+  '<td class="text-right">' + escapeHtml(fmtNum(s.market_cap, 0)) + '</td>' +
+  '</tr>';
  }).join('');
 }
 
 // 模式切换（覆盖版：支持排行榜模式）
+// 说明：导航顺序固定为 指标筛选 / 排行榜 / 代码输入 / 技术分析，
+// 切换时同步维护 .active 与 aria-current，供屏幕阅读器识别当前页签。
 function setMode(mode) {
- var filterMode = document.getElementById('filterMode');
- var codeMode = document.getElementById('codeMode');
- var mlMode = document.getElementById('mlMode');
- var rankMode = document.getElementById('rankMode');
+ var panels = { filter: 'filterMode', rank: 'rankMode', code: 'codeMode', ml: 'mlMode' };
+ var order = ['filter', 'rank', 'code', 'ml'];
 
- filterMode.style.display = 'none';
- codeMode.style.display = 'none';
- mlMode.style.display = 'none';
- rankMode.style.display = 'none';
+ order.forEach(function(key) {
+  var p = document.getElementById(panels[key]);
+  if (p) p.style.display = 'none';
+ });
+ document.querySelectorAll('.nav-link').forEach(function(el) {
+  el.classList.remove('active');
+  el.removeAttribute('aria-current');
+ });
 
- document.querySelectorAll('.nav-link').forEach(function(el) { el.classList.remove('active'); });
-
- if (mode === 'filter') {
- filterMode.style.display = 'block';
- document.querySelectorAll('.nav-link')[0].classList.add('active');
- } else if (mode === 'rank') {
- rankMode.style.display = 'block';
- document.querySelectorAll('.nav-link')[1].classList.add('active');
- } else if (mode === 'code') {
- codeMode.style.display = 'block';
- document.querySelectorAll('.nav-link')[2].classList.add('active');
- } else if (mode === 'ml') {
- mlMode.style.display = 'block';
- document.querySelectorAll('.nav-link')[3].classList.add('active');
+ var panel = document.getElementById(panels[mode]);
+ if (panel) panel.style.display = 'block';
+ var idx = order.indexOf(mode);
+ var navLinks = document.querySelectorAll('.nav-link');
+ if (idx >= 0 && navLinks[idx]) {
+  navLinks[idx].classList.add('active');
+  navLinks[idx].setAttribute('aria-current', 'page');
  }
 }
 
@@ -1387,63 +1483,57 @@ function loadTop5Day() {
 }
 
 // 首次涨停筛选
-function screenFirstLimitUp() {
- var btn = document.getElementById('btnFirstLimitUp');
- fetchRankingWithState('/api/screen/first_limit_up?limit=100', btn, function(data) {
- renderRankTable(data.data, ' 首次涨停（主板10%/创业板20%，14天内首次）', 'change_pct');
+function screenFirstLimitUp(el) {
+ fetchRankingWithState('/api/screen/first_limit_up?limit=100', resolveScreenTarget(el, 'btnFirstLimitUp'), function(data) {
+  renderRankTable(data.data, ' 首次涨停（主板10%/创业板20%，14天内首次）', 'change_pct');
  });
 }
 
 // 涨停+换手率放量2.5倍
-function screenLimitUpVolume() {
- var btn = document.getElementById('btnLimitUpVolume');
- fetchRankingWithState('/api/screen/limit_up_volume?limit=50', btn, function(data) {
- renderRankTable(data.data, ' 涨停+放量2.5倍（主板10%/创业板20%）', 'turnover_ratio');
+function screenLimitUpVolume(el) {
+ fetchRankingWithState('/api/screen/limit_up_volume?limit=50', resolveScreenTarget(el, 'btnLimitUpVolume'), function(data) {
+  renderRankTable(data.data, ' 涨停+放量2.5倍（主板10%/创业板20%）', 'turnover_ratio');
  });
 }
 
 // 连阳3-4天，涨幅<=20%
-function screenConsecutiveUp() {
- var btn = document.getElementById('btnConsecutiveUp');
- fetchRankingWithState('/api/screen/consecutive_up?limit=100', btn, function(data) {
- renderRankTable(data.data, ' 连阳5-7天≤20%', 'total_gain');
+function screenConsecutiveUp(el) {
+ fetchRankingWithState('/api/screen/consecutive_up?limit=100', resolveScreenTarget(el, 'btnConsecutiveUp'), function(data) {
+  renderRankTable(data.data, ' 连阳5-7天≤20%', 'total_gain');
  });
 }
 
 // 换手率放量≥3倍榜单（不限涨停，按放量倍数降序）
-function screenVolumeSurge() {
- var btn = document.getElementById('btnVolumeSurge');
- fetchRankingWithState('/api/screen/volume_surge?limit=50', btn, function(data) {
- renderRankTable(data.data, ' 换手率放量≥3倍', 'turnover_ratio');
+function screenVolumeSurge(el) {
+ fetchRankingWithState('/api/screen/volume_surge?limit=50', resolveScreenTarget(el, 'btnVolumeSurge'), function(data) {
+  renderRankTable(data.data, ' 换手率放量≥3倍', 'turnover_ratio');
  });
 }
 
 // 涨停回调6-7%筛选
-function screenLimitUpPullback() {
- var btn = document.getElementById('btnLimitUpPullback');
- fetchRankingWithState('/api/screen/limit_up_pullback?limit=50', btn, function(data) {
- renderRankTable(data.data, ' 涨停回调6-7%（后2~4交易日）', 'pullback_pct');
+function screenLimitUpPullback(el) {
+ fetchRankingWithState('/api/screen/limit_up_pullback?limit=50', resolveScreenTarget(el, 'btnLimitUpPullback'), function(data) {
+  renderRankTable(data.data, ' 涨停回调6-7%（后2~4交易日）', 'pullback_pct');
  });
 }
 
 // 20日涨幅超3.5%天数排行（从大到小；股价 6~40 元，20日区间涨幅≤50%）
-function screenBigUpDays() {
- var btn = document.getElementById('btnBigUpDays');
- fetchRankingWithState('/api/screen/big_up_days?limit=100&min_count=1&days=20', btn, function(data) {
- renderRankTable(data.data, ' 最近20交易日涨幅超3.5%天数排行（股价6-40元·区间涨幅≤50%）', 'big_up_days');
+function screenBigUpDays(el) {
+ fetchRankingWithState('/api/screen/big_up_days?limit=100&min_count=1&days=20', resolveScreenTarget(el, 'btnBigUpDays'), function(data) {
+  renderRankTable(data.data, ' 最近20交易日涨幅超3.5%天数排行（股价6-40元·区间涨幅≤50%）', 'big_up_days');
  });
 }
 
 // 20日涨停天数排行（按板块规则：主板9.8%/创业板科创板19.5%；同时要求≥2天涨≥5%；排除ST）
-function screenLimitUpDays() {
- var btn = document.getElementById('btnLimitUpDays');
- fetchRankingWithState('/api/screen/limit_up_days?limit=100&days=20&min_count=1', btn, function(data) {
+function screenLimitUpDays(el) {
+ fetchRankingWithState('/api/screen/limit_up_days?limit=100&days=20&min_count=1', resolveScreenTarget(el, 'btnLimitUpDays'), function(data) {
   renderRankTable(data.data, ' 最近20交易日涨停天数排行（主板10%/创业板20%·非ST）', 'limit_up_days');
  });
 }
 
 // ── 高级筛选下拉：按选项 key 执行对应榜单 ──
-function runAdvancedScreen(key) {
+// el 为触发元素（下拉框）时用于置灰与状态提示；由按钮调用时回退到对应按钮
+function runAdvancedScreen(key, el) {
  var fns = {
   firstLimitUp: screenFirstLimitUp,
   limitUpVolume: screenLimitUpVolume,
@@ -1454,7 +1544,13 @@ function runAdvancedScreen(key) {
   limitUpDays: screenLimitUpDays,
   strongPick: screenStrongPick
  };
- if (fns[key]) fns[key]();
+ if (fns[key]) fns[key](el);
+}
+
+// 榜单触发元素解析：高级筛选下拉传入 <select>，按钮直调时回退到同名按钮
+function resolveScreenTarget(el, btnId) {
+ if (el && el.tagName) return el;
+ return document.getElementById(btnId);
 }
 
 // 选中态：排行榜面板内任一按钮点击后高亮，其余恢复未选中
@@ -1469,9 +1565,8 @@ function runAdvancedScreen(key) {
 })();
 
 // 20日强势精选：≥2天大涨(≥3.5%) + 至少1次涨停 + 近10日无深跌(<-3%) + 非ST
-function screenStrongPick() {
- var btn = document.getElementById('btnStrongPick');
- fetchRankingWithState('/api/screen/big_up_days?limit=100&days=20&min_count=2&min_limit_up=1&max_drop_pct=-3&exclude_st=1', btn, function(data) {
+function screenStrongPick(el) {
+ fetchRankingWithState('/api/screen/big_up_days?limit=100&days=20&min_count=2&min_limit_up=1&max_drop_pct=-3&exclude_st=1', resolveScreenTarget(el, 'btnStrongPick'), function(data) {
   renderRankTable(data.data, ' 20日强势精选排行（≥2天大涨·≥1次涨停·近10日无深跌·非ST）', 'big_up_days');
  });
 }

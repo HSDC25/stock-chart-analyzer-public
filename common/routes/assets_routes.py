@@ -47,7 +47,11 @@ def _serve(kind, filename):
     for directory in _search_dirs(kind):
         candidate = directory / filename
         if candidate.is_file():
-            return send_from_directory(str(directory), filename)
+            response = send_from_directory(str(directory), filename)
+            # 共享脚本/字体随覆盖层热更新，禁止浏览器长期缓存，避免用户拿到旧版本；
+            # 仍保留 ETag/Last-Modified 条件请求（未变更时返回 304）。
+            response.headers['Cache-Control'] = 'no-cache'
+            return response
     return ('Not found', 404)
 
 
