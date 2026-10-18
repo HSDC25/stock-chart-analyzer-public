@@ -9,7 +9,7 @@ A 股股票图表分析工具：基于 **Flask + ECharts** 的 Web 应用，抓�
 
 | 版本 | 目录 | 渲染方式 | 打包 Python | 说明 |
 |------|------|----------|-------------|------|
-| **Win7** | `win7/` | PyQt5 + QWebEngineView（内置 Chromium） | GitHub 社区**魔改**的 Python 3.8 embeddable（官方版在 Win7 下有 bug） | WebView2 不支持 Win7，回退到浏览器内核 |
+| **Win7** | `win7/` | 调用机内已安装的 Chromium 内核浏览器打开界面（**优先 Supermium**）；另备 PyQt5 + QWebEngineView 内置窗口版 | GitHub 社区**魔改**的 Python 3.8 embeddable（官方版在 Win7 下有 bug） | WebView2 不支持 Win7，故回退到机内浏览器内核（见 `win7/WIN7_COMPAT.md`）；推荐安装 **Supermium**——仍在为 Win7 持续更新的 Chromium 分支 |
 | **Win11** | `win11/` | 系统 WebView2（Edge Chromium）/ pywebview | uv + Python 3.13 | 在维护的发布变体：HighEnd / Brutalist / Sync（主题目录仍含 Dark / Minimalist） |
 
 ## 目录结构
@@ -17,7 +17,7 @@ A 股股票图表分析工具：基于 **Flask + ECharts** 的 Web 应用，抓�
 ```
 stock-chart-analyzer/
 ├── common/      # 两个版本共享的后端包（config/db/security/preload/models/routes/updater）
-├── win7/        # Win7 桌面版（PyQt5/QWebEngine），启动器 + 模板 + 构建脚本
+├── win7/        # Win7 桌面版（浏览器壳优先 + PyQt5/QWebEngine 备选），启动器 + 模板 + 构建脚本
 ├── win11/       # Win11 桌面版（WebView2），启动器 + themes/ 多主题 + 构建脚本
 ├── assets/      # 所有主题共享的资源（fonts/ 字体、js/ 更新徽章脚本）
 ├── scripts/     # 构建期/发布期工具（update_lib、publish_update、签名脚本）

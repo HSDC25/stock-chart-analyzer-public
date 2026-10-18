@@ -10,7 +10,7 @@ Because the runtime environments differ, the project is split into two independe
 
 | Version | Directory | Rendering | Bundled Python | Notes |
 |---------|-----------|-----------|----------------|-------|
-| **Win7** | `win7/` | PyQt5 + QWebEngineView (embedded Chromium) | A GitHub community **patched** Python 3.8 embeddable (the official build is broken on Win7) | WebView2 does not support Win7, so it falls back to the browser engine |
+| **Win7** | `win7/` | Opens the UI in a locally installed Chromium-based browser (**Supermium preferred**); a PyQt5 + QWebEngineView embedded-window build is also available | A GitHub community **patched** Python 3.8 embeddable (the official build is broken on Win7) | WebView2 does not support Win7, so it falls back to the locally installed browser engine (see `win7/WIN7_COMPAT.md`); installing **Supermium** — a Chromium fork still updated for Win7 — is recommended |
 | **Win11** | `win11/` | System WebView2 (Edge Chromium) / pywebview | uv + Python 3.13 | Actively maintained release variants: HighEnd / Brutalist / Sync (the theme directories still contain Dark / Minimalist) |
 
 ## Directory layout
@@ -18,7 +18,7 @@ Because the runtime environments differ, the project is split into two independe
 ```
 stock-chart-analyzer/
 ├── common/      # Shared backend package (config/db/security/preload/models/routes/updater)
-├── win7/        # Win7 desktop build (PyQt5/QWebEngine): launcher + templates + build scripts
+├── win7/        # Win7 desktop build (browser shell preferred, PyQt5/QWebEngine fallback): launcher + templates + build scripts
 ├── win11/       # Win11 desktop build (WebView2): launcher + themes/ + build scripts
 ├── assets/      # Resources shared by all themes (fonts/, js/ update-badge script)
 ├── scripts/     # Build-time / release-time tools (update_lib, publish_update, signing scripts)

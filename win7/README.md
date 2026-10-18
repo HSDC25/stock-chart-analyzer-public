@@ -1,11 +1,24 @@
-# Win7 版本（PyQt5 + QWebEngineView）
+# Win7 版本（浏览器外壳优先 / PyQt5·QWebEngine 备选）
 
-Windows 7 兼容桌面版。由于 **WebView2 不支持 Windows 7**，本版本改用
-**PyQt5 + QWebEngineView**（内置 Chromium 引擎）作为渲染窗口，后端仍是同一个 Flask 应用。
+Windows 7 兼容桌面版。由于 **WebView2 不支持 Windows 7**，本版本默认**打开机内已安装的 Chromium
+内核浏览器**承载界面（后端仍是同一个 Flask 应用）；另备一条完全不依赖外部浏览器的
+**PyQt5 + QWebEngineView** 内置窗口路线。
+
+## 渲染方式
+
+| 外壳 | 启动器 / 产物 | 说明 |
+|---|---|---|
+| **浏览器壳（推荐）** | `launcher_win7_fast.py` → `StockChart_Win7_{32,64}_browser.exe` | 不依赖 Qt，按顺序探测机内浏览器：**Supermium → Chromium → Brave → Chrome → Vivaldi → Opera → Firefox → Edge**（常见安装目录 → 注册表 `App Paths` → 开始菜单快捷方式），命中即以 `--no-sandbox --disable-gpu` 等参数打开引导页；一个都没找到时弹窗提示并退回系统默认浏览器 |
+| **内置窗口壳（备选）** | `launcher_win7.py` → `StockChart_Win7_{32,64}.exe` | PyQt5 + QWebEngineView 自带 Chromium 内核，独立窗口、不需要任何外部浏览器；无沙箱、禁用 GPU 以提升 Win7 稳定性。Qt 渲染异常或内存紧张时改用它 |
+
+> **推荐安装 [Supermium](https://www.supermium.net/)**（[源码 / 发布页](https://github.com/win32ss/supermium)）：
+> Chrome / Edge 对 Win7 的支持早已停在 109，而 Supermium 是仍在为 Win7 持续跟进上游安全补丁的
+> Chromium 分支。装好后浏览器壳会优先选中它，无需任何额外配置。
 
 ## 文件
-- `app.py` —— Flask 装配层，注册 `common/routes/` 下的 Blueprint；`launcher_win7.py` 为主启动器（PyQt5 + QWebEngineView，无沙箱/禁用 GPU 以提升 Win7 稳定性）
-- `launcher_win7_fast.py` —— 浏览器版启动器（不依赖 Qt，调用系统 Chromium 内核浏览器）
+- `app.py` —— Flask 装配层，注册 `common/routes/` 下的 Blueprint
+- `launcher_win7_fast.py` —— **浏览器壳启动器（推荐）**，不依赖 Qt，调用机内 Chromium 内核浏览器
+- `launcher_win7.py` —— 内置窗口壳启动器（备选），PyQt5 + QWebEngineView，无沙箱/禁用 GPU 以提升 Win7 稳定性
 - `build_win7.py` / `build_win7_browser.py` —— 两个打包脚本（onefile / windowed，内联 VC 运行时，禁用 UPX）
 - `StockChart_Win7_{32,64}[_browser].spec` —— 由打包脚本按命令行参数自动生成的 PyInstaller 配置
 - `templates/` `static/` —— 本版本 UI
@@ -17,17 +30,17 @@ Windows 7 兼容桌面版。由于 **WebView2 不支持 Windows 7**，本版本�
 ## 构建
 ```bash
 cd win7
-python build_win7.py           # PyQt5/QWebEngine 内置浏览器版（32 + 64 位）
-python build_win7_browser.py   # 走系统浏览器的轻量版（32 + 64 位）
+python build_win7_browser.py   # 浏览器壳：调用机内 Chromium 内核浏览器（推荐；32 + 64 位）
+python build_win7.py           # PyQt5/QWebEngine 内置窗口壳（备选；32 + 64 位）
 ```
 产物：`dist/StockChart_Win7_{64,32}[_browser]_v<构建日期>.exe`（同名旧版本自动清除），
 同时把最新一份以稳定名复制到 `outputs/StockChart_Win7_{64,32}[_browser].exe` 供分发。
 
 | 目标机器 | 用哪个 |
 |---|---|
-| 32 位 Win7 | `outputs/StockChart_Win7_32.exe` |
-| 64 位 Win7 | `outputs/StockChart_Win7_64.exe` |
-| Qt 渲染异常 / 内存紧张 | 对应的 `*_browser.exe` |
+| 32 位 Win7 | `outputs/StockChart_Win7_32_browser.exe` |
+| 64 位 Win7 | `outputs/StockChart_Win7_64_browser.exe` |
+| 不希望依赖外部浏览器 / Qt 渲染异常 / 内存紧张 | 对应的 `StockChart_Win7_{32,64}.exe`（内置窗口壳） |
 
 ## 自动更新
 
@@ -45,8 +58,10 @@ Win7 侧的两点约束：`common/updater.py`、`common/version.py` 必须保持
 ## 运行（开发模式）
 ```bash
 cd win7
-python launcher_win7.py
+python launcher_win7_fast.py   # 浏览器壳（推荐）
+python launcher_win7.py        # 内置窗口壳（备选）
 ```
-Flask 在 `127.0.0.1` 随机端口启动，PyQt5 窗口加载该地址。
+Flask 在 `127.0.0.1` 随机端口启动：浏览器壳把它交给机内 Chromium 内核浏览器打开（优先 Supermium），
+内置窗口壳则用 PyQt5 窗口加载该地址。
 
 > 详细兼容方案见 `WIN7_COMPAT.md`。
