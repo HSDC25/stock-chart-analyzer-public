@@ -1,14 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+# 以 spec 文件所在目录定位工程根目录，避免硬编码开发者机器上的绝对路径
+_SPEC_DIR = os.path.abspath(SPECPATH)
+_ROOT = os.path.abspath(os.path.join(_SPEC_DIR, '..'))
+
 
 block_cipher = None
 
 
 a = Analysis(
     ['launcher_win7.py'],
-    pathex=['C:\\Users\\ASUS\\.qoderworkcn\\workspace\\mqxnujmu7xwpkdh9'],
+    pathex=[_ROOT],
     binaries=[],
-    datas=[('templates', 'templates'), ('static', 'static'), ('../assets/fonts', 'assets/fonts'), ('../assets/js', 'assets/js'), ('build_info.json', '.'), ('C:\\Users\\ASUS\\.qoderworkcn\\workspace\\mqxnujmu7xwpkdh9\\win7\\win7_runtime\\win32', '.')],
+    datas=[('templates', 'templates'), ('static', 'static'), (os.path.join(_ROOT, 'assets', 'fonts'), 'assets/fonts'), (os.path.join(_ROOT, 'assets', 'js'), 'assets/js'), ('build_info.json', '.'), (os.path.join(_SPEC_DIR, 'win7_runtime', 'win32'), '.')],
     hiddenimports=['flask', 'pandas', 'numpy', 'baostock', 'certifi', 'ssl', 'sqlite3', 'requests', 'common', 'common.cache', 'common.config', 'common.db', 'common.fetcher', 'common.indicators', 'common.models', 'common.preload', 'common.screening', 'common.security', 'common.trading_calendar', 'common.routes', 'common.routes.api_routes', 'common.routes.chart_routes', 'common.routes.ml_routes', 'common.routes.screen_routes', 'common.routes.assets_routes', 'common.routes.update_routes', 'common.version', 'common.updater'],
     hookspath=[],
     hooksconfig={},

@@ -625,4 +625,25 @@ body { padding-top: calc(var(--font-base) * 3.7); }
 }
 #rankModeSelect:hover { border-color: #0969da; }
 #rankModeSelect:focus { border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,.15); }
+/* ── 通用提示类（JS 动态生成内容使用；与 .muted-text 配套） ── */
+.msg-error { color: #f85149; }            /* 错误提示：暗底对比度 ≈ 4.6:1 */
+.table-empty { text-align: center; color: var(--text-muted, #8b949e); padding: 60px; }
+.chart-msg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 200px;
+    color: var(--text-muted, #8b949e);
+}
+
+/* ── 尊重系统"减少动态效果"偏好 ── */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+}
 .rank-selected { outline: 2px solid rgba(127, 197, 255, 0.9); outline-offset: -2px; font-weight: 700; }

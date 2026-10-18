@@ -317,12 +317,12 @@ body {
 }
 
 .btn-warning {
- background: #f39c12;
+ background: #b45309;
  color: #fff;
 }
 
 .btn-warning:hover {
- background: #e67e22;
+ background: #92400e;
 }
 
 .btn-danger {
@@ -452,7 +452,7 @@ body {
 
 .preload-info {
  font-size: 12px;
- color: #888;
+ color: #666;
  display: flex;
  justify-content: space-between;
 }
@@ -572,11 +572,11 @@ body {
 }
 
 .change-up {
- color: #e74c3c;
+ color: #c0392b;
 }
 
 .change-down {
- color: #27ae60;
+ color: #1e8449;
 }
 
 /* ===== 图表区 ===== */
@@ -623,7 +623,7 @@ body {
  justify-content: center;
  align-items: center;
  height: 100%;
- color: #999;
+ color: #767676;
 }
 
 .empty-state svg {
@@ -700,7 +700,7 @@ body {
  display: flex;
  justify-content: space-between;
  font-size: 11px;
- color: #888;
+ color: #666;
 }
 
 /* ===== 警告框 ===== */
@@ -914,4 +914,26 @@ body.font-extra-large .sidebar { width: 400px; }
 }
 #rankModeSelect:hover { border-color: #0969da; }
 #rankModeSelect:focus { border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,.15); }
+/* ── 通用提示类（JS 动态生成内容使用；替代分散的内联样式） ── */
+.muted-text { color: #666; }              /* 次要说明文字：白底对比度 ≈ 5.7:1 */
+.msg-error { color: #c0392b; }            /* 错误提示：白底对比度 ≈ 5.4:1 */
+.table-empty { text-align: center; color: #767676; padding: 60px; }
+.chart-msg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 200px;
+    color: #767676;
+}
+
+/* ── 尊重系统"减少动态效果"偏好 ── */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+}
 .rank-selected { outline: 2px solid rgba(127, 197, 255, 0.9); outline-offset: -2px; font-weight: 700; }
