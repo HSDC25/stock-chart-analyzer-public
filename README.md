@@ -106,7 +106,7 @@ python win11/build_win11_webview.py
 python win7/build_win7.py
 python win7/build_win7_browser.py
 
-# 2. （可选）代码签名，见下节
+# 2. （可选）代码签名，见下节（签名后确认 common/updater.py 的 TRUSTED_CERT_SHA256 已含新指纹）
 powershell -File scripts/sign_executables.ps1
 
 # 3. 生成 update.json + 各变体 UI zip，并上传到服务器
@@ -161,6 +161,20 @@ python scripts/publish_update.py --scp user@<your-server>:/var/www/stockdata/upd
   ```
 
   证书剩余有效期不足 30 天时 `new_signing_cert.ps1` 会自动重签（`.cer` 公钥需重新分发一次）。
+  自签证书不在系统信任链里，所以**自动更新另有一条兜底通道**：`common/updater.py` 的 `TRUSTED_CERT_SHA256`
+  白名单。客户端校验更新包签名时，满足「系统信任链通过」**或**「签名者证书 DER 的 SHA-256 命中白名单」即放行
+  —— 没跑过 `trust_signing_cert.ps1` 的机器就只能走后者。**发布前必须确认白名单里有当前签名证书的指纹**，
+  否则发出去的包会把那些机器的更新链自己锁死：
+  * `new_signing_cert.ps1` 与 `sign_executables.ps1` 结束时都会打印证书 DER 的 SHA-256，并落盘到
+    `signing/cert_sha256.txt`；后者还会自动和源码里的白名单对一遍，没对上直接告警。
+  * 把该值填进 `common/updater.py` 的 `TRUSTED_CERT_SHA256 = ('<64 位小写 hex>',)`。
+  * **换证书 / 轮换**：新旧指纹**同时**列在白名单里，等还停在旧包的客户端都升上来（或旧包自然淘汰）
+    再删旧值。删早了，用旧包的机器换体时会被自己的校验拒掉，从此再也更新不了。
+  * 临时调试可用环境变量 `STOCKCHART_TRUSTED_CERT_SHA256`（逗号分隔）追加，不必改代码。
+  * 白名单只对「签名完整、单纯信任判定不过」的错误码生效（如 `CERT_E_UNTRUSTEDROOT`）；未签名
+    （`TRUST_E_NOSIGNATURE`）与摘要被篡改（`TRUST_E_BAD_DIGEST`）一律拒绝，白名单不会变成绕过
+    篡改检测的后门。回归测试见
+    `tests/test_updater.py::test_signature_never_pins_unsigned_or_tampered`。
   **必须说清的代价**：自签证书不在系统信任链里，Windows 10/11 的 SmartScreen 仍会拦一道"未知发布者"，
   需要用户在属性里点"仍然运行"或预先分发 `.cer`；企业分发或彻底消除警告只能买商业代码签名证书。
   `signing/`、`*.pfx`、`*.cer` 已加入 `.gitignore`，私钥绝不入库（PFX 密码存 `signing/pfx_password.txt`，

@@ -61,8 +61,18 @@ $cer = Join-Path $StoreDir 'stockchart-codeSigning.cer'
 Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $PfxPassword | Out-Null
 Export-Certificate -Cert $cert -FilePath $cer | Out-Null
 
+# 3. 顺带把「证书 DER 的 SHA-256」算出来落盘 + 打印：客户端除了系统信任链，还会认
+#    这张白名单 —— 目标机没跑 trust_signing_cert.ps1 时全靠它，漏填就等于发布后更新链锁死。
+$certSha256 = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData) |
+               ForEach-Object { $_.ToString('x2') }) -join ''
+$fpFile = Join-Path $StoreDir 'cert_sha256.txt'
+Set-Content -Path $fpFile -Value $certSha256 -Encoding ASCII
+
 Write-Host ""
 Write-Host "PFX  : $pfx      （构建机专用，含私钥，已加入 .gitignore）"
 Write-Host "CER  : $cer      （分发到目标机器执行 trust_signing_cert.ps1）"
-Write-Host "指纹 : $($cert.Thumbprint)"
+Write-Host "指纹 : $($cert.Thumbprint)      （Thumbprint，SHA-1 展示形式）"
+Write-Host "指纹 : $certSha256"
+Write-Host "        ↑ 请填进 common/updater.py 的 TRUSTED_CERT_SHA256（未装根证书的机器靠它通过校验）"
+Write-Host "        已写入 $fpFile"
 Write-Host "下一步: .\scripts\sign_executables.ps1"

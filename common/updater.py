@@ -215,6 +215,57 @@ _WTD_REVOCATION_CHECK_NONE = 0x00000010
 _WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000
 _WTD_SAFER_FLAG = 0x00000100
 
+# 签名者证书指纹白名单（证书 DER 的 SHA-256，小写十六进制）。项目用的是**自签**代码签名
+# 证书，目标机没跑过 scripts/trust_signing_cert.ps1 时系统信任链必然失败；此时只认
+# 「签名者证书指纹命中这里」的包，避免自签方案把自动更新整条链锁死。
+#   * 指纹由 scripts/sign_executables.ps1 打印（new_signing_cert.ps1 也会输出）
+#   * 换证书时把新旧指纹同时列上，等旧包自然淘汰后再删掉旧的那条
+#   * 调试可用环境变量 STOCKCHART_TRUSTED_CERT_SHA256（逗号分隔）临时追加
+# 留空 = 只认系统信任链（等价于没有兜底，未装根证书的机器会一直更新失败）。
+TRUSTED_CERT_SHA256 = ()
+
+# 「签名本身完整、只是信任判定不过」的错误码：这类才允许用指纹白名单兜底放行。
+# TRUST_E_NOSIGNATURE(0x800B0100)、TRUST_E_BAD_DIGEST(0x80096010)、TRUST_E_FAIL(0x800B010B)
+# 等一律不在列 —— 白名单绝不能变成「绕过篡改检测」的后门。
+_PIN_FALLBACK_CODES = frozenset((
+    0x800B0101,  # CERT_E_EXPIRED             证书过期（根治是重新签名，兜底只为不断链）
+    0x800B0102,  # CERT_E_VALIDITYPERIODNESTING
+    0x800B0109,  # CERT_E_UNTRUSTEDROOT       根不受信：自签证书的常态
+    0x800B010A,  # CERT_E_CHAINING
+    0x800B010C,  # CERT_E_REVOKED
+    0x800B0110,  # CERT_E_WRONG_USAGE
+    0x800B0111,  # TRUST_E_EXPLICIT_DISTRUST
+    0x800B0112,  # CERT_E_REVOCATION_FAILURE
+))
+
+
+class _CERT_CONTEXT(ctypes.Structure):
+    """CERT_CONTEXT：pbCertEncoded/cbCertEncoded 就是证书 DER，可直接算指纹。"""
+
+    _fields_ = [
+        ('dwCertEncodingType', ctypes.c_ulong),
+        ('pbCertEncoded', ctypes.POINTER(ctypes.c_ubyte)),
+        ('cbCertEncoded', ctypes.c_ulong),
+        ('pCertInfo', ctypes.c_void_p),
+        ('hCertStore', ctypes.c_void_p),
+    ]
+
+
+class _CRYPT_PROVIDER_CERT(ctypes.Structure):
+    """wintrust 的 WTHelper* 系列返回的证书结点，pCert 指向签名者 CERT_CONTEXT。"""
+
+    _fields_ = [
+        ('cbStruct', ctypes.c_ulong),
+        ('pCert', ctypes.POINTER(_CERT_CONTEXT)),
+        ('fCommercial', ctypes.c_int),
+        ('fTrustedRoot', ctypes.c_int),
+        ('fSelfSigned', ctypes.c_int),
+        ('fTestCert', ctypes.c_int),
+        ('dwRevokedReason', ctypes.c_ulong),
+        ('dwConfidence', ctypes.c_ulong),
+        ('dwError', ctypes.c_ulong),
+    ]
+
 
 class _GUID(ctypes.Structure):
     _fields_ = [
@@ -279,11 +330,17 @@ def verify_exe_signature(path):
     """Require a machine-trusted Authenticode signature on *path*.
 
     换体前的最后一道把关：manifest 里的 ``sha256`` 来自同一份 manifest，攻击者一旦
-    拿到 ``data.hsdc.cloud`` 的发布能力就能连带改掉摘要，摘要本身无法自证；只有
-    "签名者必须在本机受信任根中"才能把"攻破更新源 → 任意 EXE 落地执行"这条路堵死。
+    拿到 ``data.hsdc.cloud`` 的发布能力就能连带改掉摘要，摘要本身无法自证；签名才能
+    证明"这份 EXE 出自官方"。
 
-    未签名、被篡改或签名者不受信任时抛 ``UpdateError``。非 Windows 平台没有
-    Authenticode 与换体流程，直接放行。
+    两条放行通道，满足其一即可：
+
+    1. 系统信任链通过（``WinVerifyTrust`` 返回 0，如目标机已装自签根证书）；
+    2. 签名者证书指纹命中内置白名单 ``TRUSTED_CERT_SHA256`` —— 项目用自签证书，
+       目标机没跑 ``trust_signing_cert.ps1`` 时只能走这条，否则更新链会自己锁死。
+
+    未签名、摘要被篡改、签名者既不受信也不在白名单时抛 ``UpdateError``。非 Windows
+    平台没有 Authenticode 与换体流程，直接放行。
     """
     path = Path(path)
     if os.name != 'nt':
@@ -294,27 +351,43 @@ def verify_exe_signature(path):
         raise UpdateError('无法加载签名校验组件: {}'.format(exc))
 
     try:
-        result = _wintrust_verify(path, _WINTRUST_DATA)
+        result, signer_der = _wintrust_verify(path, _WINTRUST_DATA)
         # Win7 不认识 Win8+ 追加的字段，会以 E_INVALIDARG 拒收更大的 cbStruct；
         # 退回旧结构再验一次，免得老系统上所有更新都被误判成"签名不可信"。
         if (result & 0xFFFFFFFF) == _E_INVALIDARG:
-            result = _wintrust_verify(path, _WINTRUST_DATA_V1)
+            result, signer_der = _wintrust_verify(path, _WINTRUST_DATA_V1)
     except OSError as exc:
         raise UpdateError('系统缺少 wintrust.dll，无法校验更新包签名: {}'.format(exc))
 
-    if result != _WVTRUST_OK:
+    if result == _WVTRUST_OK:
+        return
+
+    code = result & 0xFFFFFFFF
+    fingerprints = _trusted_cert_sha256()
+    # 只有"签名完整、单纯信任判定不过"的错误码才给白名单机会；摘要被改过会返回
+    # TRUST_E_BAD_DIGEST（不在 _PIN_FALLBACK_CODES 里），未签名返回 TRUST_E_NOSIGNATURE，
+    # 两者都直接落到下面的拒绝分支。
+    if code in _PIN_FALLBACK_CODES and signer_der and fingerprints:
+        actual = hashlib.sha256(signer_der).hexdigest()
+        if actual in fingerprints:
+            return
         raise UpdateError(
-            '程序更新包签名校验失败（0x{:08X}）：不是受信任的官方签名，已拒绝安装'
-            .format(result & 0xFFFFFFFF)
+            '更新包签名者证书指纹不在白名单（{}…）：不是官方发布的包，已拒绝安装'
+            .format(actual[:16])
         )
+
+    raise UpdateError(
+        '程序更新包签名校验失败（0x{:08X}）：不是受信任的官方签名，已拒绝安装'.format(code)
+    )
 
 
 def _wintrust_verify(path, data_cls):
-    # type: (Path, type) -> int
+    # type: (Path, type) -> tuple
     """用 *data_cls* 指定的 WINTRUST_DATA 版式跑一次 WinVerifyTrust。
 
-    返回原始结果码（0 即签名且信任链可信）。VERIFY 必须配对 CLOSE，否则 wintrust
-    内部状态会一直挂着，因此无论成败都在 finally 里收尾。
+    返回 ``(结果码, 签名者证书 DER 或 None)``，结果码 0 即签名且信任链可信。
+    VERIFY 必须配对 CLOSE，否则 wintrust 内部状态会一直挂着，因此无论成败都在
+    finally 里收尾（证书 DER 必须在 CLOSE 之前取走）。
     """
     from ctypes import wintypes
 
@@ -351,13 +424,64 @@ def _wintrust_verify(path, data_cls):
     wintrust.WinVerifyTrust.argtypes = [wintypes.HWND, ctypes.POINTER(_GUID),
                                         ctypes.c_void_p]
     try:
-        return int(wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data)))
+        result = int(wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data)))
+        # 证书 DER 必须在 CLOSE 之前取：CLOSE 会把 provider 数据一起放掉
+        return result, _signer_cert_der(wintrust, data)
     finally:
         data.dwStateAction = _WTD_STATEACTION_CLOSE
         try:
             wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data))
         except Exception:
             pass
+
+
+def _signer_cert_der(wintrust, data):
+    # type: (object, object) -> bytes | None
+    """取出本次 VERIFY 会话里签名者证书的 DER 字节；取不到（未签名等）返回 None。
+
+    走 wintrust 自带的 WTHelper 链：state data → provider data → 主签名者 → 证书结点。
+    比自行解析 PKCS#7 短得多，也不必处理签名里可能夹带的证书环。
+    """
+    from ctypes import wintypes
+
+    try:
+        state = data.hWVTStateData
+        if not state:
+            return None
+        wintrust.WTHelperProvDataFromStateData.restype = ctypes.c_void_p
+        wintrust.WTHelperProvDataFromStateData.argtypes = [ctypes.c_void_p]
+        provider = wintrust.WTHelperProvDataFromStateData(state)
+        if not provider:
+            return None
+        wintrust.WTHelperGetProvSignerFromChain.restype = ctypes.c_void_p
+        wintrust.WTHelperGetProvSignerFromChain.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, wintypes.BOOL, ctypes.c_ulong]
+        signer = wintrust.WTHelperGetProvSignerFromChain(provider, 0, False, 0)
+        if not signer:
+            return None
+        wintrust.WTHelperGetProvCertFromChain.restype = ctypes.c_void_p
+        wintrust.WTHelperGetProvCertFromChain.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        node = wintrust.WTHelperGetProvCertFromChain(signer, 0)
+        if not node:
+            return None
+        provider_cert = ctypes.cast(node, ctypes.POINTER(_CRYPT_PROVIDER_CERT)).contents
+        if not provider_cert.pCert:
+            return None
+        cert = provider_cert.pCert.contents
+        if not cert.pbCertEncoded or not cert.cbCertEncoded:
+            return None
+        return ctypes.string_at(cert.pbCertEncoded, cert.cbCertEncoded)
+    except Exception:
+        return None
+
+
+def _trusted_cert_sha256():
+    # type: () -> frozenset
+    """内置白名单 + ``STOCKCHART_TRUSTED_CERT_SHA256``（逗号分隔）追加，统一小写。"""
+    values = [str(v).strip().lower() for v in TRUSTED_CERT_SHA256 if str(v).strip()]
+    extra = os.environ.get('STOCKCHART_TRUSTED_CERT_SHA256') or ''
+    values.extend(part.strip().lower() for part in extra.split(',') if part.strip())
+    return frozenset(values)
 
 
 # ────────────────────────────────────────────────────────────────────────────
