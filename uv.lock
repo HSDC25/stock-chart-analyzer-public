@@ -1306,6 +1306,11 @@ dev = [
     { name = "responses" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pyinstaller" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "akshare", specifier = ">=1.11.0" },
@@ -1325,6 +1330,9 @@ requires-dist = [
     { name = "webdriver-manager", marker = "extra == 'chart-export'", specifier = ">=4.0.0" },
 ]
 provides-extras = ["chart-export", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pyinstaller", specifier = ">=6.21.0" }]
 
 [[package]]
 name = "tabulate"
