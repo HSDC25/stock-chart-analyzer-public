@@ -61,6 +61,9 @@ def test_only_https_is_trusted():
     assert not updater.is_trusted_url('http://203.0.113.10/stockdata/update.json')
     assert not updater.is_trusted_url('http://data.hsdc.cloud/update.json')
     assert not updater.is_trusted_url('ftp://data.hsdc.cloud/update.json')
+    # 主机白名单：只认发布主机，任意 HTTPS 主机不能再下发载荷
+    assert not updater.is_trusted_url('https://evil.example/a.exe')
+    assert not updater.is_trusted_url('https://data.hsdc.cloud.evil.example/update.json')
 
 
 def test_variant_entry_matches_case_and_suffix():
@@ -181,6 +184,101 @@ def test_safe_extract_rejects_absolute(tmp_path):
         zf.writestr('/etc/passwd', 'boom')
     with pytest.raises(updater.UpdateError):
         updater._safe_extract(zipfile.ZipFile(str(evil)), tmp_path / 'out')
+
+
+def test_safe_extract_rejects_zip_bomb(tmp_path, monkeypatch):
+    """解压上限：声明体积超限即拒绝，不必真的往磁盘写几百 MB。"""
+    monkeypatch.setattr(updater, '_MAX_EXTRACT_BYTES', 1024)
+    bomb = tmp_path / 'bomb.zip'
+    with zipfile.ZipFile(str(bomb), 'w') as zf:
+        zf.writestr('big.bin', b'\x00' * 4096)
+    with pytest.raises(updater.UpdateError, match='体积'):
+        updater._safe_extract(zipfile.ZipFile(str(bomb)), tmp_path / 'out_bomb')
+    assert not (tmp_path / 'out_bomb' / 'big.bin').exists()
+
+
+def test_safe_extract_rejects_too_many_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, '_MAX_EXTRACT_ENTRIES', 3)
+    many = tmp_path / 'many.zip'
+    with zipfile.ZipFile(str(many), 'w') as zf:
+        for i in range(5):
+            zf.writestr('f{}.txt'.format(i), 'x')
+    with pytest.raises(updater.UpdateError, match='条目'):
+        updater._safe_extract(zipfile.ZipFile(str(many)), tmp_path / 'out_many')
+
+
+# ---------------------------------------------------------------------------
+# Authenticode signature on EXE payloads
+# ---------------------------------------------------------------------------
+
+def test_exe_signature_rejects_unsigned_binary(tmp_path):
+    if os.name != 'nt':
+        pytest.skip('Authenticode 只在 Windows 上有意义')
+    fake = tmp_path / 'fake.exe'
+    fake.write_bytes(b'MZ' + b'\x00' * 128)
+    with pytest.raises(updater.UpdateError, match='签名'):
+        updater.verify_exe_signature(fake)
+
+
+def test_exe_signature_accepts_trusted_system_binary():
+    if os.name != 'nt':
+        pytest.skip('Authenticode 只在 Windows 上有意义')
+    # 系统自带的 explorer.exe 带内嵌 Authenticode 签名且签名者在本机受信任根中；
+    # 注意 System32 下大量文件（where.exe/notepad.exe…）其实只有 catalog 签名，
+    # WinVerifyTrust 按文件查不到，不适合当正例。
+    candidates = [
+        os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe'),
+        r'C:\Program Files\Git\cmd\git.exe',
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand):
+            updater.verify_exe_signature(cand)     # 不抛异常即通过
+            return
+    pytest.skip('本机找不到可用于正例的官方签名程序')
+
+
+def test_signature_retries_with_legacy_struct_on_invalidarg(monkeypatch, tmp_path):
+    """Win7 不认新版 WINTRUST_DATA 的额外字段，回 E_INVALIDARG 时必须换旧结构重试。"""
+    calls = []
+
+    def fake_verify(path, data_cls):
+        calls.append(data_cls.__name__)
+        return updater._E_INVALIDARG if len(calls) == 1 else 0
+
+    monkeypatch.setattr(updater, '_wintrust_verify', fake_verify)
+    monkeypatch.setattr(updater.os, 'name', 'nt')     # 骗过平台判断，走真实分支
+    updater.verify_exe_signature(tmp_path / 'x.exe')
+    assert calls == ['_WINTRUST_DATA', '_WINTRUST_DATA_V1']
+
+
+def test_signature_does_not_retry_when_new_struct_works(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_verify(path, data_cls):
+        calls.append(data_cls.__name__)
+        return 0
+
+    monkeypatch.setattr(updater, '_wintrust_verify', fake_verify)
+    monkeypatch.setattr(updater.os, 'name', 'nt')
+    updater.verify_exe_signature(tmp_path / 'x.exe')
+    assert calls == ['_WINTRUST_DATA']
+
+
+def test_download_signature_flag_blocks_unsigned_exe(update_server, tmp_path):
+    """download(verify_signature=True) 必须在本体落盘前挡住未签名载荷。"""
+    if os.name != 'nt':
+        pytest.skip('Authenticode 只在 Windows 上有意义')
+    base, port = update_server
+    payload = b'MZ' + b'\x00' * 256
+    (base / 'a.exe').write_bytes(payload)
+    sha = hashlib.sha256(payload).hexdigest()
+    # 落到子目录：update_server 的 base 就是 tmp_path，直接写 tmp_path/'a.exe'
+    # 会与测试自己造的"服务端"文件撞名，断言就失去意义了
+    dest = tmp_path / 'dl' / 'a.exe'
+    with pytest.raises(updater.UpdateError, match='签名'):
+        updater.download('http://127.0.0.1:{}/a.exe'.format(port), dest, sha,
+                         '程序更新包', verify_signature=True)
+    assert not dest.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +497,7 @@ def test_exe_update_leaves_the_serving_overlay_alone(update_server, monkeypatch,
     payload = tmp_path / 'a.exe'
     payload.write_bytes(b'new-exe')
 
-    def fake_download(url, dest, sha, label, cancel=None):
+    def fake_download(url, dest, sha, label, cancel=None, **kwargs):
         _shutil.copy2(str(payload), str(dest))
 
     restarted = []
@@ -411,6 +509,35 @@ def test_exe_update_leaves_the_serving_overlay_alone(update_server, monkeypatch,
     assert result['kind'] == 'exe' and restarted and result['restart_required'] is True
     index = updater.overlay_dir() / 'templates' / 'index.html'
     assert index.read_text(encoding='utf-8') == 'SERVING'
+
+
+def test_run_update_refuses_unsigned_exe_end_to_end(update_server, monkeypatch, tmp_path):
+    """真实下载路径：清单摘要对得上但 EXE 没官方签名时，必须整单失败且不动旧本体。"""
+    if os.name != 'nt':
+        pytest.skip('Authenticode 只在 Windows 上有意义')
+    base, port = update_server
+    payload = b'MZ' + b'\x00' * 256                     # 冒充 EXE，摘要真实但无签名
+    (base / 'a.exe').write_bytes(payload)
+    (base / 'update.json').write_text(json.dumps({'variants': {
+        'StockChart_Win11_HighEnd': {
+            'version': '2030.01.01',
+            'exe_url': 'http://127.0.0.1:{}/a.exe'.format(port),
+            'exe_sha256': hashlib.sha256(payload).hexdigest(),
+        }}}), encoding='utf-8')
+    monkeypatch.setattr(updater, 'APP_VERSION', '2020.01.01')
+    monkeypatch.setattr(updater, 'VARIANT', 'StockChart_Win11_HighEnd')
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    fake_exe = tmp_path / 'bin' / 'StockChart_Win11_HighEnd.exe'
+    fake_exe.parent.mkdir(parents=True, exist_ok=True)
+    fake_exe.write_bytes(b'old-exe')
+    monkeypatch.setattr(sys, 'executable', str(fake_exe))
+    monkeypatch.setattr(updater, '_writable_exe_dir', lambda p: True)
+
+    result = updater.run_update(auto_apply=True, restart=True)
+    assert result.get('updated') is False
+    assert result.get('phase') == 'failed'
+    assert '签名' in str(result.get('error') or '')
+    assert fake_exe.read_bytes() == b'old-exe'          # 旧本体必须原封不动
 
 
 def test_cleanup_leftovers_drops_only_the_stale_overlay(monkeypatch, tmp_path):

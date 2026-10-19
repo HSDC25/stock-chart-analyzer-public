@@ -339,7 +339,10 @@ def register_security(app):
             "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https:; "
-            "connect-src 'self'"
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'self'"
         )
         response.headers['Strict-Transport-Security'] = (
             'max-age=31536000; includeSubDomains'
