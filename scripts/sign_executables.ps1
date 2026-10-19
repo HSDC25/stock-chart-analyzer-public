@@ -103,6 +103,31 @@ foreach ($exe in $exes) {
 
 $ErrorActionPreference = 'Stop'
 Write-Host "`n完成：共 $($exes.Count) 个，失败 $fail 个，未建立信任 $untrusted 个"
+
+# 5. 防呆：客户端对自签证书的兜底就是「签名者证书指纹白名单」，漏填 = 发布后客户端
+#    自己把更新全部拒掉（未装根证书的机器没有第二条路）。这里顺手和源码里的白名单对一遍。
+$updaterPy = Join-Path $repo 'common\updater.py'
+$whitelist = @()
+if (Test-Path $updaterPy) {
+    $whitelist = @([regex]::Matches((Get-Content $updaterPy -Raw), "'([0-9a-fA-F]{64})'") |
+                   ForEach-Object { $_.Groups[1].Value.ToLower() })
+}
+$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+        Where-Object { $_.Subject -eq $Subject } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+if ($cert) {
+    $certSha256 = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData) |
+                   ForEach-Object { $_.ToString('x2') }) -join ''
+    Write-Host "`n[白名单] 本次签名证书 DER SHA-256: $certSha256"
+    if ($whitelist -contains $certSha256) {
+        Write-Host '[白名单] OK：已在 common/updater.py 的 TRUSTED_CERT_SHA256 里'
+    } elseif (-not $whitelist.Count) {
+        Write-Warning "common/updater.py 的 TRUSTED_CERT_SHA256 还是空的！未装根证书的目标机将拒收所有更新（更新链锁死）。请在 common/updater.py 里填：`n    TRUSTED_CERT_SHA256 = ('$certSha256',)"
+    } else {
+        Write-Warning "白名单里没有这张证书（现有 $($whitelist.Count) 条指纹）。请确认是否需要补上：`n    '$certSha256'"
+    }
+}
+
 if ($fail) { exit 1 }
 if ($untrusted) {
     Write-Host '提示：在目标机（管理员）执行 .\scripts\trust_signing_cert.ps1 后，verify /pa 才会通过。'

@@ -134,7 +134,8 @@ python win11/build_win11_webview.py
 python win7/build_win7.py
 python win7/build_win7_browser.py
 
-# 2. (Optional) code signing, see the next section
+# 2. (Optional) code signing, see the next section (after signing, make sure TRUSTED_CERT_SHA256
+#    in common/updater.py holds the new fingerprint)
 powershell -File scripts/sign_executables.ps1
 
 # 3. Generate update.json + the UI zip for each variant, and upload to the server
@@ -204,6 +205,24 @@ committed). Once the upload is done, clients discover it on their next poll — 
 
   When a certificate has less than 30 days of validity left, `new_signing_cert.ps1` re-signs automatically (the `.cer`
   public key must be redistributed once).
+  A self-signed certificate is not in the system trust chain, so automatic updates have a **second acceptance path**:
+  the `TRUSTED_CERT_SHA256` whitelist in `common/updater.py`. When a client verifies the signature of an update payload
+  it accepts it when **either** the system trust chain passes **or** the SHA-256 of the signer certificate's DER matches
+  the whitelist — machines that never ran `trust_signing_cert.ps1` have only the latter. **Before releasing you must make
+  sure the whitelist holds the fingerprint of the current signing certificate**, otherwise you ship a package that locks
+  those machines out of their own update chain:
+  * `new_signing_cert.ps1` and `sign_executables.ps1` both print the certificate's DER SHA-256 when they finish and write
+    it to `signing/cert_sha256.txt`; the latter also diffs it against the whitelist in the source tree and warns on a
+    miss.
+  * Put that value into `TRUSTED_CERT_SHA256 = ('<64 lowercase hex>',)` in `common/updater.py`.
+  * **Rotation**: list the old and the new fingerprint **side by side**, and only drop the old one after every client
+    still on an older package has upgraded (or that package has been retired). Remove it too early and machines still
+    running the old build get their swap-and-restart rejected by their own check and can never update again.
+  * For temporary debugging, `STOCKCHART_TRUSTED_CERT_SHA256` (comma-separated) appends entries without touching code.
+  * The whitelist only applies to "signature intact, purely a trust decision that failed" error codes (such as
+    `CERT_E_UNTRUSTEDROOT`); unsigned payloads (`TRUST_E_NOSIGNATURE`) and tampered digests (`TRUST_E_BAD_DIGEST`) are
+    always rejected — the whitelist must never become a way around tamper detection. Regression test:
+    `tests/test_updater.py::test_signature_never_pins_unsigned_or_tampered`.
   **The cost must be stated clearly**: a self-signed certificate is not in the system trust chain, so Windows 10/11's
   SmartScreen still blocks it as an "unknown publisher", requiring the user to click "Run anyway" in the properties or
   to distribute the `.cer` in advance; enterprise distribution, or eliminating the warning entirely, requires buying a

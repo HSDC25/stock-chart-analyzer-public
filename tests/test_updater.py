@@ -243,7 +243,7 @@ def test_signature_retries_with_legacy_struct_on_invalidarg(monkeypatch, tmp_pat
 
     def fake_verify(path, data_cls):
         calls.append(data_cls.__name__)
-        return updater._E_INVALIDARG if len(calls) == 1 else 0
+        return (updater._E_INVALIDARG, None) if len(calls) == 1 else (0, None)
 
     monkeypatch.setattr(updater, '_wintrust_verify', fake_verify)
     monkeypatch.setattr(updater.os, 'name', 'nt')     # 骗过平台判断，走真实分支
@@ -256,7 +256,7 @@ def test_signature_does_not_retry_when_new_struct_works(monkeypatch, tmp_path):
 
     def fake_verify(path, data_cls):
         calls.append(data_cls.__name__)
-        return 0
+        return (0, None)
 
     monkeypatch.setattr(updater, '_wintrust_verify', fake_verify)
     monkeypatch.setattr(updater.os, 'name', 'nt')
@@ -279,6 +279,81 @@ def test_download_signature_flag_blocks_unsigned_exe(update_server, tmp_path):
         updater.download('http://127.0.0.1:{}/a.exe'.format(port), dest, sha,
                          '程序更新包', verify_signature=True)
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# 自签证书指纹白名单：目标机没装根证书时的第二条放行通道
+# ---------------------------------------------------------------------------
+
+_PROBE_DER = b'\x30\x82\x01\x00probe-signer-certificate-der'
+_PROBE_FP = hashlib.sha256(_PROBE_DER).hexdigest()
+
+
+def _pin_verify(monkeypatch, result, der):
+    """把 _wintrust_verify 换成"信任链失败 + 固定签名者证书 DER"。"""
+    monkeypatch.setattr(updater, '_wintrust_verify',
+                        lambda path, data_cls: (result, der))
+    monkeypatch.setattr(updater.os, 'name', 'nt')     # 骗过平台判断，走真实分支
+
+
+def test_signature_accepts_pinned_signer_cert(monkeypatch, tmp_path):
+    """系统信任链不过（自签不受信）但指纹命中白名单 -> 放行，更新链不能自己锁死。"""
+    _pin_verify(monkeypatch, 0x800B0109, _PROBE_DER)       # CERT_E_UNTRUSTEDROOT
+    monkeypatch.setenv('STOCKCHART_TRUSTED_CERT_SHA256', _PROBE_FP)
+    updater.verify_exe_signature(tmp_path / 'x.exe')       # 不抛异常即通过
+
+
+def test_signature_rejects_unpinned_signer_cert(monkeypatch, tmp_path):
+    _pin_verify(monkeypatch, 0x800B0109, _PROBE_DER)
+    monkeypatch.setenv('STOCKCHART_TRUSTED_CERT_SHA256', 'a' * 64)
+    with pytest.raises(updater.UpdateError, match='指纹'):
+        updater.verify_exe_signature(tmp_path / 'x.exe')
+
+
+@pytest.mark.parametrize('code', [0x800B0100, 0x80096010])
+def test_signature_never_pins_unsigned_or_tampered(monkeypatch, tmp_path, code):
+    """未签名 / 摘要被篡改时白名单绝不能兜底，否则白名单就成了篡改后门。"""
+    _pin_verify(monkeypatch, code, _PROBE_DER)
+    monkeypatch.setenv('STOCKCHART_TRUSTED_CERT_SHA256', _PROBE_FP)
+    with pytest.raises(updater.UpdateError, match='签名校验失败'):
+        updater.verify_exe_signature(tmp_path / 'x.exe')
+
+
+def test_signature_requires_nonempty_whitelist(monkeypatch, tmp_path):
+    """白名单为空 = 只认系统信任链，不做无意义的指纹比对。"""
+    _pin_verify(monkeypatch, 0x800B0109, _PROBE_DER)
+    monkeypatch.delenv('STOCKCHART_TRUSTED_CERT_SHA256', raising=False)
+    with pytest.raises(updater.UpdateError, match='签名校验失败'):
+        updater.verify_exe_signature(tmp_path / 'x.exe')
+
+
+def test_trusted_cert_sha256_merges_and_normalizes(monkeypatch):
+    monkeypatch.setattr(updater, 'TRUSTED_CERT_SHA256', ('AA' * 32, ''))
+    monkeypatch.setenv('STOCKCHART_TRUSTED_CERT_SHA256',
+                       ' ' + 'BB' * 32 + ' , ' + 'CC' * 32 + ',')
+    got = updater._trusted_cert_sha256()
+    assert ('aa' * 32) in got       # 内置项，大写 -> 小写
+    assert ('bb' * 32) in got       # env 首项，首尾空白被 strip
+    assert ('cc' * 32) in got       # env 次项
+    assert '' not in got            # 空项丢弃
+
+
+def test_signer_cert_der_extracted_for_trusted_binary():
+    """真实签名程序上证书 DER 必须取得到 —— 这是指纹兜底的前提条件。"""
+    if os.name != 'nt':
+        pytest.skip('Authenticode 只在 Windows 上有意义')
+    candidates = [
+        os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe'),
+        r'C:\Program Files\Git\cmd\git.exe',
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand):
+            result, der = updater._wintrust_verify(cand, updater._WINTRUST_DATA)
+            assert result == 0
+            assert isinstance(der, (bytes, bytearray)) and len(der) > 100
+            assert len(hashlib.sha256(der).hexdigest()) == 64
+            return
+    pytest.skip('本机找不到可用于正例的官方签名程序')
 
 
 # ---------------------------------------------------------------------------
