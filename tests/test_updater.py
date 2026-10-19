@@ -322,6 +322,7 @@ def test_signature_never_pins_unsigned_or_tampered(monkeypatch, tmp_path, code):
 def test_signature_requires_nonempty_whitelist(monkeypatch, tmp_path):
     """白名单为空 = 只认系统信任链，不做无意义的指纹比对。"""
     _pin_verify(monkeypatch, 0x800B0109, _PROBE_DER)
+    monkeypatch.setattr(updater, 'TRUSTED_CERT_SHA256', ())   # 模拟尚未填入指纹
     monkeypatch.delenv('STOCKCHART_TRUSTED_CERT_SHA256', raising=False)
     with pytest.raises(updater.UpdateError, match='签名校验失败'):
         updater.verify_exe_signature(tmp_path / 'x.exe')
