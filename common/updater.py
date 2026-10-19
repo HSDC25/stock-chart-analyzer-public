@@ -222,7 +222,11 @@ _WTD_SAFER_FLAG = 0x00000100
 #   * 换证书时把新旧指纹同时列上，等旧包自然淘汰后再删掉旧的那条
 #   * 调试可用环境变量 STOCKCHART_TRUSTED_CERT_SHA256（逗号分隔）临时追加
 # 留空 = 只认系统信任链（等价于没有兜底，未装根证书的机器会一直更新失败）。
-TRUSTED_CERT_SHA256 = ()
+# 当前证书 CN=HSDC StockChart Code Signing（2029-10-04 到期）。2026-10-19 填入，
+# 与 signing/stockchart-codeSigning.cer、服务器上的同名 cer 三处核验一致。
+TRUSTED_CERT_SHA256 = (
+    '363c8f4af9df6cf47ca6f714f3bdc36f09680a6385233c25e3a7539ac2d3644b',
+)
 
 # 「签名本身完整、只是信任判定不过」的错误码：这类才允许用指纹白名单兜底放行。
 # TRUST_E_NOSIGNATURE(0x800B0100)、TRUST_E_BAD_DIGEST(0x80096010)、TRUST_E_FAIL(0x800B010B)
