@@ -31,3 +31,29 @@ def test_rate_limiter_refill():
     time.sleep(0.05)
     # rate=100/s => 0.05s 后应补充约 5 个令牌
     assert rl.acquire() == 0
+
+
+def _app_with_security():
+    from flask import Flask
+
+    from common.security import register_security
+
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    register_security(app)
+
+    @app.route("/ping")
+    def _ping():
+        return "pong"
+
+    return app
+
+
+def test_csp_hardens_object_base_and_framing():
+    """CSP 需关掉插件与 base-uri 劫持面，并锁死 frame-ancestors。"""
+    headers = _app_with_security().test_client().get("/ping").headers
+    csp = headers["Content-Security-Policy"]
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "frame-ancestors 'self'" in csp

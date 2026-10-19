@@ -73,9 +73,12 @@ def api_chart_export():
         return jsonify({'success': False, 'error': '服务器内部错误，请稍后重试'}), 500
 
 
-@chart_bp.route('/api/show-save-dialog', methods=['GET'])
+@chart_bp.route('/api/show-save-dialog', methods=['POST'])
 def api_show_save_dialog():
     """Open a native save-file dialog and return the chosen path.
+
+    只允许 POST：该端点有副作用（在用户屏幕上弹原生对话框），GET 会被任意网页用
+    ``<img>``/``fetch`` 打过来变成弹窗骚扰，而 CSRF 校验对 GET 一律放行。
 
     Uses an optional callback stored in ``current_app.config['SAVE_DIALOG_FN']``.
     When the callback is ``None`` (e.g. running without pywebview), returns

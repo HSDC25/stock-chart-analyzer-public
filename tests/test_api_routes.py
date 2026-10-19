@@ -341,6 +341,16 @@ class TestScreeningSQLRewrites:
         assert "000001" in codes or not body["data"]
 
 
+class TestChartExport:
+    def test_show_save_dialog_is_post_only(self, client):
+        """有副作用的端点不许被 GET 触发：GET 不走 CSRF 校验，任意网页都能打过来。"""
+        assert client.get("/api/show-save-dialog").status_code == 405
+
+        token = client.get("/api/csrf-token").get_json()["csrf_token"]
+        resp = client.post("/api/show-save-dialog", headers={"X-CSRF-Token": token})
+        assert resp.status_code != 405
+
+
 class TestPreloadEndpoints:
     def test_preload_status(self, client):
         resp = client.get("/api/preload/status")

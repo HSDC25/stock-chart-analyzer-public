@@ -19,6 +19,7 @@ code), and a ``sha256`` in the manifest is mandatory for both payloads.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -40,6 +41,13 @@ from .version import APP_VERSION, VARIANT, is_newer
 DEFAULT_MANIFEST_URL = 'https://data.hsdc.cloud/update.json'
 USER_AGENT = 'StockChart-Updater/1.0'
 PLACEHOLDER = '-'
+
+# 更新链只信任这些主机上的 HTTPS（逗号分隔可用环境变量覆盖，便于自建镜像站）。
+TRUSTED_UPDATE_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.environ.get('STOCKCHART_TRUSTED_HOSTS', 'data.hsdc.cloud').split(',')
+    if h.strip()
+)
 
 # ── shared progress state (written by the worker thread, read by /api/update/status)
 _state = {
@@ -130,11 +138,17 @@ def manifest_url():
 
 def is_trusted_url(url):
     # type: (str) -> bool
-    """Accept HTTPS only, plus plain HTTP on loopback so the test suite works."""
+    """Accept HTTPS on the release host only, plus plain HTTP on loopback.
+
+    更新链的可信根必须收窄到发布主机：manifest 里的 ``exe_url``/``ui_url`` 若允许指向
+    任意 HTTPS 主机，攻击者只要能让清单指向自己的域名就能下发任意载荷。loopback 的
+    HTTP 例外留给测试与本地回环。
+    """
     parsed = urlparse(url)
+    host = (parsed.hostname or '').lower()
     if parsed.scheme == 'https':
-        return True
-    if parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost', '::1'):
+        return host in TRUSTED_UPDATE_HOSTS
+    if parsed.scheme == 'http' and host in ('127.0.0.1', 'localhost', '::1'):
         return True
     return False
 
@@ -184,6 +198,169 @@ def variant_entry(manifest, variant=None):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Authenticode signature check
+# ────────────────────────────────────────────────────────────────────────────
+
+# WinVerifyTrust 返回 0（ERROR_SUCCESS）表示签名存在且整条信任链被本机信任；
+# 其余返回值（含未签名、被篡改、签名者不在受信任根中）一律视为不可信。
+_WVTRUST_OK = 0
+# 结构体版式比本机系统认识的更新时 WinVerifyTrust 回这个（用于 Win7 回退旧结构）
+_E_INVALIDARG = 0x80070057
+_WTD_UI_NONE = 2
+_WTD_REVOKE_NONE = 0
+_WTD_CHOICE_FILE = 1
+_WTD_STATEACTION_VERIFY = 1
+_WTD_STATEACTION_CLOSE = 2
+_WTD_REVOCATION_CHECK_NONE = 0x00000010
+_WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000
+_WTD_SAFER_FLAG = 0x00000100
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ('Data1', ctypes.c_ulong),
+        ('Data2', ctypes.c_ushort),
+        ('Data3', ctypes.c_ushort),
+        ('Data4', ctypes.c_ubyte * 8),
+    ]
+
+
+class _WINTRUST_FILE_INFO(ctypes.Structure):
+    _fields_ = [
+        ('cbStruct', ctypes.c_ulong),
+        ('pcwszFilePath', ctypes.c_wchar_p),
+        ('hFile', ctypes.c_void_p),
+        ('pgKnownSubject', ctypes.POINTER(_GUID)),
+    ]
+
+
+class _WINTRUST_DATA(ctypes.Structure):
+    _fields_ = [
+        ('cbStruct', ctypes.c_ulong),
+        ('pPolicyCallbackData', ctypes.c_void_p),
+        ('pSIPClientData', ctypes.c_void_p),
+        ('dwUIChoice', ctypes.c_ulong),
+        ('fdwRevocationChecks', ctypes.c_ulong),
+        ('dwUnionChoice', ctypes.c_ulong),
+        ('pFile', ctypes.POINTER(_WINTRUST_FILE_INFO)),
+        ('dwStateAction', ctypes.c_ulong),
+        ('hWVTStateData', ctypes.c_void_p),
+        ('pwszURLReference', ctypes.c_wchar_p),
+        ('dwProvFlags', ctypes.c_ulong),
+        ('dwUIContext', ctypes.c_ulong),
+        ('pSignatureSettings', ctypes.c_void_p),
+    ]
+
+
+class _WINTRUST_DATA_V1(ctypes.Structure):
+    """Windows 7 时代的 WINTRUST_DATA：到 ``dwProvFlags`` 为止。
+
+    Win8 才补上 ``dwUIContext``/``pSignatureSettings``；Win7 的 WinVerifyTrust 拿到
+    更大的 ``cbStruct`` 会回 E_INVALIDARG，所以先按新结构试，失败再退到这一版。
+    """
+
+    _fields_ = [
+        ('cbStruct', ctypes.c_ulong),
+        ('pPolicyCallbackData', ctypes.c_void_p),
+        ('pSIPClientData', ctypes.c_void_p),
+        ('dwUIChoice', ctypes.c_ulong),
+        ('fdwRevocationChecks', ctypes.c_ulong),
+        ('dwUnionChoice', ctypes.c_ulong),
+        ('pFile', ctypes.POINTER(_WINTRUST_FILE_INFO)),
+        ('dwStateAction', ctypes.c_ulong),
+        ('hWVTStateData', ctypes.c_void_p),
+        ('pwszURLReference', ctypes.c_wchar_p),
+        ('dwProvFlags', ctypes.c_ulong),
+    ]
+
+
+def verify_exe_signature(path):
+    # type: (Path) -> None
+    """Require a machine-trusted Authenticode signature on *path*.
+
+    换体前的最后一道把关：manifest 里的 ``sha256`` 来自同一份 manifest，攻击者一旦
+    拿到 ``data.hsdc.cloud`` 的发布能力就能连带改掉摘要，摘要本身无法自证；只有
+    "签名者必须在本机受信任根中"才能把"攻破更新源 → 任意 EXE 落地执行"这条路堵死。
+
+    未签名、被篡改或签名者不受信任时抛 ``UpdateError``。非 Windows 平台没有
+    Authenticode 与换体流程，直接放行。
+    """
+    path = Path(path)
+    if os.name != 'nt':
+        return
+    try:
+        from ctypes import wintypes  # noqa: F401
+    except Exception as exc:  # pragma: no cover - 仅在异常环境触发
+        raise UpdateError('无法加载签名校验组件: {}'.format(exc))
+
+    try:
+        result = _wintrust_verify(path, _WINTRUST_DATA)
+        # Win7 不认识 Win8+ 追加的字段，会以 E_INVALIDARG 拒收更大的 cbStruct；
+        # 退回旧结构再验一次，免得老系统上所有更新都被误判成"签名不可信"。
+        if (result & 0xFFFFFFFF) == _E_INVALIDARG:
+            result = _wintrust_verify(path, _WINTRUST_DATA_V1)
+    except OSError as exc:
+        raise UpdateError('系统缺少 wintrust.dll，无法校验更新包签名: {}'.format(exc))
+
+    if result != _WVTRUST_OK:
+        raise UpdateError(
+            '程序更新包签名校验失败（0x{:08X}）：不是受信任的官方签名，已拒绝安装'
+            .format(result & 0xFFFFFFFF)
+        )
+
+
+def _wintrust_verify(path, data_cls):
+    # type: (Path, type) -> int
+    """用 *data_cls* 指定的 WINTRUST_DATA 版式跑一次 WinVerifyTrust。
+
+    返回原始结果码（0 即签名且信任链可信）。VERIFY 必须配对 CLOSE，否则 wintrust
+    内部状态会一直挂着，因此无论成败都在 finally 里收尾。
+    """
+    from ctypes import wintypes
+
+    # WINTRUST_ACTION_GENERIC_VERIFY_V2 {00AAC56B-CD44-11D0-8CC2-00C04FC295EE}
+    action = _GUID(0x00AAC56B, 0xCD44, 0x11D0,
+                   (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
+
+    file_info = _WINTRUST_FILE_INFO()
+    file_info.cbStruct = ctypes.sizeof(_WINTRUST_FILE_INFO)
+    file_info.pcwszFilePath = str(path)
+    file_info.hFile = None
+    file_info.pgKnownSubject = None
+
+    data = data_cls()
+    data.cbStruct = ctypes.sizeof(data_cls)
+    data.pPolicyCallbackData = None
+    data.pSIPClientData = None
+    data.dwUIChoice = _WTD_UI_NONE
+    data.fdwRevocationChecks = _WTD_REVOKE_NONE
+    data.dwUnionChoice = _WTD_CHOICE_FILE
+    data.pFile = ctypes.pointer(file_info)
+    data.dwStateAction = _WTD_STATEACTION_VERIFY
+    data.hWVTStateData = None
+    data.pwszURLReference = None
+    # 关掉联网吊销查询（离线也要能更新），并走 SAFER 校验路径
+    data.dwProvFlags = (_WTD_REVOCATION_CHECK_NONE | _WTD_CACHE_ONLY_URL_RETRIEVAL
+                        | _WTD_SAFER_FLAG)
+    if hasattr(data, 'dwUIContext'):
+        data.dwUIContext = 0
+        data.pSignatureSettings = None
+
+    wintrust = ctypes.WinDLL('wintrust.dll')
+    wintrust.WinVerifyTrust.restype = wintypes.LONG
+    wintrust.WinVerifyTrust.argtypes = [wintypes.HWND, ctypes.POINTER(_GUID),
+                                        ctypes.c_void_p]
+    try:
+        return int(wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data)))
+    finally:
+        data.dwStateAction = _WTD_STATEACTION_CLOSE
+        try:
+            wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data))
+        except Exception:
+            pass
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Downloads
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -201,9 +378,13 @@ def _sha256_of(path, cancel=None):
     return h.hexdigest()
 
 
-def download(url, dest, sha256, label, cancel=None, timeout=600):
-    # type: (str, Path, str, str, threading.Event | None, int) -> None
-    """Stream *url* to *dest* and require its sha256 to match before returning."""
+def download(url, dest, sha256, label, cancel=None, timeout=600, verify_signature=False):
+    # type: (str, Path, str, str, threading.Event | None, int, bool) -> None
+    """Stream *url* to *dest*; require sha256, and for EXEs a trusted signature.
+
+    ``verify_signature`` 由程序本体的下载置 True —— sha256 只能证明"与清单一致"，
+    而清单与摘要同源、无法自证；Authenticode 签名才证明"确实出自官方"。
+    """
     if not sha256:
         raise UpdateError('{} 缺少 sha256，拒绝安装'.format(label))
     if not is_trusted_url(url):
@@ -233,6 +414,9 @@ def download(url, dest, sha256, label, cancel=None, timeout=600):
         actual = _sha256_of(partial, cancel)
         if actual.lower() != sha256.strip().lower():
             raise UpdateError('{} 校验失败（sha256 不匹配，可能被篡改或下载不完整）'.format(label))
+        if verify_signature:
+            # 摘要与清单同源，只有签名能证明这份 EXE 出自官方；不通过则绝不落盘换体
+            verify_exe_signature(partial)
         if dest.exists():
             dest.unlink()
         shutil.move(str(partial), str(dest))
@@ -247,6 +431,11 @@ def download(url, dest, sha256, label, cancel=None, timeout=600):
 # ────────────────────────────────────────────────────────────────────────────
 # UI overlay
 # ────────────────────────────────────────────────────────────────────────────
+
+# 解压上限（zip bomb 防护）：界面覆盖层实际只有几百 KB，留足余量即可
+_MAX_EXTRACT_BYTES = 256 * 1024 * 1024
+_MAX_EXTRACT_ENTRIES = 20000
+
 
 def overlay_dir(variant=None):
     # type: (str | None) -> Path
@@ -353,15 +542,26 @@ def overlay_dirs(template_subdir='templates', static_subdir='static'):
 
 def _safe_extract(zf, dest):
     # type: (zipfile.ZipFile, Path) -> None
-    """Extract *zf* into *dest*, rejecting absolute or ``..`` member names."""
+    """Extract *zf* into *dest*, rejecting absolute/``..`` names and zip bombs.
+
+    界面覆盖层只有几百 KB，这里给解压后总量与条目数各设一道上限：即使清单被
+    篡改成指向一个"解压即撑爆磁盘"的包，也解不到一半就被拒绝。
+    """
     dest = Path(dest)
-    for member in zf.infolist():
+    infos = zf.infolist()
+    if len(infos) > _MAX_EXTRACT_ENTRIES:
+        raise UpdateError('更新包条目过多（{}），已拒绝'.format(len(infos)))
+    declared = 0
+    for member in infos:
         name = member.filename.replace('\\', '/')
         if name.startswith('/') or re.match(r'^[A-Za-z]:', name):
             raise UpdateError('更新包内含非法绝对路径: {}'.format(member.filename))
         parts = [p for p in name.split('/') if p not in ('', '.')]
         if '..' in parts:
             raise UpdateError('更新包内含越界路径: {}'.format(member.filename))
+        declared += member.file_size
+        if declared > _MAX_EXTRACT_BYTES:
+            raise UpdateError('更新包解压后体积超过上限，已拒绝')
     zf.extractall(str(dest))
 
 
@@ -562,7 +762,7 @@ def run_update(auto_apply=True, restart=True, cancel=None):
                 raise UpdateError('更新清单缺少 exe_url')
             new_exe = workdir / exe_path.name
             download(str(entry['exe_url']), new_exe, str(entry.get('exe_sha256') or ''),
-                     '程序更新包', cancel)
+                     '程序更新包', cancel, verify_signature=True)
             # 覆盖层不在这里删：这个进程很可能正用它渲染页面（界面热更后就一直挂着），
             # 删掉之后到 os._exit 之前若有请求就是整页 500，走 staged 分支更是能挂到下次重启。
             # 新 EXE 内置界面不比它旧，overlay_dirs() 的版本闸门本来就会忽略这份，
@@ -716,5 +916,7 @@ def apply_staged_update():
         staged = pending[0] if pending else staged
     if not staged.is_file():
         raise UpdateError('没有待安装的更新包')
+    # 待装包躺在磁盘上可能已被替换，换体前再验一次签名
+    verify_exe_signature(staged)
     schedule_restart(str(staged))
     return True
