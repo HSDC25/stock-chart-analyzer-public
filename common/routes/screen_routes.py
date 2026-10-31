@@ -23,6 +23,59 @@ screen_bp = Blueprint('screen', __name__)
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _window_start(cur, days):
+    """倒数第 *days* 个交易日的日期，用作窗口查询的下界。
+
+    库只增不减（每个交易日约 +4600 行），不加下界的 ROW_NUMBER 会随历史变长
+    退化成全表扫描（126 万行实测 1.12s，加下界 0.61s）。历史不足 *days* 天时
+    退回最早一天，等价于不设下界。
+
+    调用方会传 3 倍窗口：K 线按"每股最近 N 根"数，如果贴着 N 个交易日切，
+    停牌几天或日期不齐的股票就会少算；留 3 倍余量既保住原有语义，
+    又能砍掉大部分历史行。
+    """
+    row = cur.execute(
+        'SELECT date FROM kline_data GROUP BY date ORDER BY date DESC LIMIT 1 OFFSET ?',
+        (max(int(days), 1) - 1,)).fetchone()
+    if row and row[0]:
+        return row[0]
+    row = cur.execute('SELECT MIN(date) FROM kline_data').fetchone()
+    return row[0] if row and row[0] else ''
+
+
+def _latest_date(cur):
+    row = cur.execute('SELECT MAX(date) FROM kline_data').fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _meta_map(cur, codes):
+    """一次 IN 查询取回全部元数据（逐股点查在 100 条时虽只要 2ms，但没必要）。"""
+    if not codes:
+        return {}
+    qmarks = ','.join('?' * len(codes))
+    rows = cur.execute(
+        'SELECT code, name, price, change_pct, pe, pb, market_cap, volume '
+        'FROM stock_metadata WHERE code IN (%s)' % qmarks, codes)
+    return {r[0]: r for r in rows}
+
+
+def _attach_meta(hit, meta_row):
+    """把 stock_metadata 的一行铺到结果 dict 上，数值统一两位小数。"""
+    hit['name'] = meta_row[1] or ''
+    for key, value in zip(['price', 'change_pct', 'pe', 'pb', 'market_cap', 'volume'],
+                          meta_row[2:]):
+        hit[key] = round(float(value), 2) if value is not None else None
+    return hit
+
+
+def _is_st(name):
+    return 'ST' in (name or '').upper()
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -555,6 +608,7 @@ def screen_big_up_days():
                        ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
                 FROM kline_data
                 WHERE pct_change IS NOT NULL
+                  AND date >= ?
                   AND code IN (SELECT code FROM meta)
             ),
             agg AS (
@@ -585,7 +639,8 @@ def screen_big_up_days():
               ''' + _drop_cond + '''
         '''
         results = []
-        _params = [min_price, max_price,
+        _window_floor = _window_start(cur, days * 3)
+        _params = [min_price, max_price, _window_floor,
                    threshold, days, days,
                    min_bars, min_count, max_count,
                    min_limit_up, max_range_gain]
@@ -749,6 +804,7 @@ def screen_limit_up_days():
                        ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
                 FROM kline_data
                 WHERE pct_change IS NOT NULL
+                  AND date >= ?
                   AND code IN (
                       SELECT code FROM stock_metadata
                       WHERE name NOT LIKE '%ST%'
@@ -771,7 +827,7 @@ def screen_limit_up_days():
             ORDER BY lu_days DESC, big_days DESC
             LIMIT ?
         '''
-        cur.execute(_sql, (big_threshold, days, min_bars,
+        cur.execute(_sql, (_window_start(cur, days * 3), big_threshold, days, min_bars,
                            min_count, min_big_up, limit))
         columns = ['code', 'limit_up_days', 'big_up_days', 'total_days']
         rows = cur.fetchall()
@@ -808,3 +864,282 @@ def screen_limit_up_days():
     except Exception as e:
         logger.exception("Failed to screen limit-up-days stocks")
         return jsonify({'success': False, 'error': '服务器内部错误: %s' % str(e)}), 500
+
+
+@screen_bp.route('/api/screen/consecutive_limit_up')
+def screen_consecutive_limit_up():
+    """连板高度：截至最新交易日连续涨停 >= min_boards 的股票。
+
+    与"涨停天数排行"的区别：那个数的是窗口内涨停的天数（可以不连续），
+    这里数的是**当前还在延续**的连板高度，并按板块规则判定涨停。
+    """
+    try:
+        from common.config import DB_PATH
+        from common.screening import is_limit_up
+
+        limit = int(request.args.get('limit', 100))
+        min_boards = max(int(request.args.get('min_boards', 2)), 1)
+
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        cur = conn.cursor()
+        latest_date = _latest_date(cur)
+        if not latest_date:
+            conn.close()
+            return jsonify({'success': False, 'error': 'No data'})
+
+        # 连板最多看 60 个交易日（再长的连板极罕见）；历史不足时自动退化
+        cutoff = _window_start(cur, 60)
+        rows = cur.execute('''
+            SELECT code, date, close, low, volume, pct_change
+            FROM kline_data
+            WHERE date >= ? AND pct_change IS NOT NULL
+            ORDER BY code, date DESC
+        ''', (cutoff,)).fetchall()
+
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(row[1:])
+
+        hits = []
+        for code, bars in grouped.items():
+            if not bars or bars[0][0] != latest_date:
+                continue        # 停牌或数据没更新到最新交易日，不算"当前连板"
+            streak = 0
+            for bar in bars:
+                if is_limit_up(code, bar[4]):
+                    streak += 1
+                else:
+                    break
+            if streak < min_boards:
+                continue
+            base_close = bars[streak][2] if len(bars) > streak else None
+            latest_close = bars[0][2]
+            total_gain = None
+            if base_close and base_close > 0 and latest_close is not None:
+                total_gain = round((latest_close - base_close) / base_close * 100, 2)
+            hits.append({
+                'code': code,
+                'boards': streak,
+                'first_limit_date': bars[streak - 1][0],
+                'latest_pct': round(bars[0][4], 2),
+                'total_gain': total_gain,
+            })
+
+        meta = _meta_map(cur, [h['code'] for h in hits])
+        conn.close()
+
+        results = []
+        for hit in hits:
+            meta_row = meta.get(hit['code'])
+            if not meta_row or _is_st(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
+                continue
+            results.append(_attach_meta(hit, meta_row))
+        results.sort(key=lambda r: (r['boards'], r.get('change_pct') or 0), reverse=True)
+
+        return jsonify({
+            'success': True, 'data': results[:limit], 'total': len(results),
+            'type': 'consecutive_limit_up',
+            'params': {'min_boards': min_boards},
+        })
+    except Exception as e:
+        logger.exception("Failed to screen consecutive limit-up stocks")
+        return jsonify({'success': False, 'error': '服务器内部错误: %s' % str(e)}), 500
+
+
+@screen_bp.route('/api/screen/shrink_pullback')
+def screen_shrink_pullback():
+    """涨停后的缩量回调：回撤 5~15%，且最新量能萎缩到前 5 日均量的 vol_ratio 倍以下。
+
+    与"涨停回调6-7%"的区别：那个只看价格与天数、窗口短；这里给回撤区间放宽，
+    并且要求量能同步萎缩——放量下跌不算洗盘。
+    """
+    try:
+        from common.config import DB_PATH
+        from common.screening import is_limit_up
+
+        limit = int(request.args.get('limit', 100))
+        days = max(int(request.args.get('days', 15)), 5)
+        pullback_min = float(request.args.get('pullback_min', 5.0))
+        pullback_max = float(request.args.get('pullback_max', 15.0))
+        vol_ratio = float(request.args.get('vol_ratio', 0.6))
+        min_days_after = max(int(request.args.get('min_days_after', 2)), 1)
+
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        cur = conn.cursor()
+        latest_date = _latest_date(cur)
+        if not latest_date:
+            conn.close()
+            return jsonify({'success': False, 'error': 'No data'})
+
+        cutoff = _window_start(cur, days)
+        rows = cur.execute('''
+            SELECT code, date, close, low, volume, pct_change
+            FROM kline_data
+            WHERE date >= ? AND pct_change IS NOT NULL
+            ORDER BY code, date DESC
+        ''', (cutoff,)).fetchall()
+
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(row[1:])
+
+        hits = []
+        for code, bars in grouped.items():
+            if not bars or bars[0][0] != latest_date or len(bars) < min_days_after + 2:
+                continue
+            limit_idx = None
+            for i in range(min_days_after, len(bars)):
+                if is_limit_up(code, bars[i][4]):
+                    limit_idx = i
+                    break
+            if limit_idx is None:
+                continue
+            limit_close = bars[limit_idx][2]
+            if not limit_close or limit_close <= 0:
+                continue
+            lows = [b[2] for b in bars[:limit_idx] if b[2] is not None]
+            if not lows:
+                continue
+            min_low = min(lows)
+            pullback = (limit_close - min_low) / limit_close * 100
+            if not (pullback_min <= pullback <= pullback_max):
+                continue
+            prev_vols = [b[3] for b in bars[1:6] if b[3] is not None]
+            latest_vol = bars[0][3]
+            if not prev_vols or latest_vol is None:
+                continue
+            avg_prev = sum(prev_vols) / len(prev_vols)
+            if avg_prev <= 0:
+                continue
+            shrink = latest_vol / avg_prev
+            if shrink > vol_ratio:
+                continue
+            hits.append({
+                'code': code,
+                'pullback_pct': round(pullback, 2),
+                'days_after_limit_up': limit_idx,
+                'vol_shrink_ratio': round(shrink, 2),
+                'limit_up_date': bars[limit_idx][0],
+                'limit_up_price': round(limit_close, 2),
+                'latest_pct': round(bars[0][4], 2),
+            })
+
+        meta = _meta_map(cur, [h['code'] for h in hits])
+        conn.close()
+
+        results = []
+        for hit in hits:
+            meta_row = meta.get(hit['code'])
+            if not meta_row or _is_st(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
+                continue
+            results.append(_attach_meta(hit, meta_row))
+        results.sort(key=lambda r: r['pullback_pct'], reverse=True)
+
+        return jsonify({
+            'success': True, 'data': results[:limit], 'total': len(results),
+            'type': 'shrink_pullback',
+            'params': {'days': days, 'pullback_min': pullback_min,
+                       'pullback_max': pullback_max, 'vol_ratio': vol_ratio},
+        })
+    except Exception as e:
+        logger.exception("Failed to screen shrink-pullback stocks")
+        return jsonify({'success': False, 'error': '服务器内部错误: %s' % str(e)}), 500
+
+
+@screen_bp.route('/api/screen/new_high_breakout')
+def screen_new_high_breakout():
+    """N 日新高突破：最新收盘高于前 N-1 根 K 线的最高收盘，且放量、当日有涨幅。
+
+    "突破"必须带量才有意义，所以默认要求量能 >= 前 5 日均量的 1.5 倍；
+    停牌股/数据没更新到最新交易日的股票不参与。
+    """
+    try:
+        from common.config import DB_PATH
+
+        limit = int(request.args.get('limit', 100))
+        days = max(int(request.args.get('days', 20)), 5)
+        vol_ratio = float(request.args.get('vol_ratio', 1.5))
+        min_gain = float(request.args.get('min_gain', 1.0))
+        # "N 日新高"必须真的有 N 根 K 线：不足 N 根的新股/停牌股不参与，
+        # 否则 base_close 为空、区间涨幅也失去意义。
+        min_bars = days
+
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        cur = conn.cursor()
+        latest_date = _latest_date(cur)
+        if not latest_date:
+            conn.close()
+            return jsonify({'success': False, 'error': 'No data'})
+        cutoff = _window_start(cur, days)
+
+        rows = cur.execute('''
+            WITH win AS (
+                SELECT code, date, close, volume, pct_change,
+                       ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn
+                FROM kline_data
+                WHERE date >= ? AND pct_change IS NOT NULL
+            ),
+            agg AS (
+                SELECT code,
+                       MAX(CASE WHEN rn = 1 THEN close END) AS latest_close,
+                       MAX(CASE WHEN rn = 1 THEN volume END) AS latest_volume,
+                       MAX(CASE WHEN rn = 1 THEN pct_change END) AS latest_pct,
+                       MAX(CASE WHEN rn = 1 THEN date END) AS latest_date,
+                       MAX(CASE WHEN rn BETWEEN 2 AND ? THEN close END) AS prev_high,
+                       AVG(CASE WHEN rn BETWEEN 2 AND 6 THEN volume END) AS prev5_volume,
+                       MAX(CASE WHEN rn = ? THEN close END) AS base_close,
+                       COUNT(*) AS bars
+                FROM win
+                WHERE rn <= ?
+                GROUP BY code
+            ),
+            scored AS (
+                SELECT code, latest_close, latest_pct, latest_date, prev_high, base_close,
+                       CASE WHEN prev5_volume > 0
+                            THEN latest_volume / prev5_volume END AS vol_ratio
+                FROM agg
+                WHERE bars >= ?
+            )
+            SELECT m.code, m.name, m.price, m.change_pct, m.pe, m.pb, m.market_cap,
+                   m.volume, s.latest_pct, s.vol_ratio,
+                   ROUND((s.latest_close - s.base_close) / s.base_close * 100, 2) AS range_gain
+            FROM scored s
+            JOIN stock_metadata m ON m.code = s.code
+            WHERE s.latest_date = ?
+              AND s.prev_high IS NOT NULL
+              AND s.latest_close > s.prev_high
+              AND s.base_close > 0
+              AND s.vol_ratio >= ?
+              AND s.latest_pct >= ?
+              AND m.price > 0
+              AND m.name NOT LIKE '%ST%'
+            ORDER BY s.vol_ratio DESC
+            LIMIT ?
+        ''', (cutoff, days, days, days, min_bars, latest_date,
+              vol_ratio, min_gain, limit)).fetchall()
+        conn.close()
+
+        results = []
+        for row in rows:
+            results.append({
+                'code': row[0], 'name': row[1] or '',
+                'price': round(float(row[2]), 2) if row[2] is not None else None,
+                'change_pct': round(float(row[3]), 2) if row[3] is not None else None,
+                'pe': round(float(row[4]), 2) if row[4] is not None else None,
+                'pb': round(float(row[5]), 2) if row[5] is not None else None,
+                'market_cap': round(float(row[6]), 2) if row[6] is not None else None,
+                'volume': round(float(row[7]), 2) if row[7] is not None else None,
+                'latest_pct': round(float(row[8]), 2) if row[8] is not None else None,
+                'vol_ratio': round(float(row[9]), 2) if row[9] is not None else None,
+                'range_gain': round(float(row[10]), 2) if row[10] is not None else None,
+            })
+
+        return jsonify({
+            'success': True, 'data': results, 'total': len(results),
+            'type': 'new_high_breakout',
+            'params': {'days': days, 'vol_ratio': vol_ratio, 'min_gain': min_gain},
+        })
+    except Exception as e:
+        logger.exception("Failed to screen new-high breakout stocks")
+        return jsonify({'success': False, 'error': '服务器内部错误: %s' % str(e)}), 500
+

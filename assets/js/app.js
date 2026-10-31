@@ -1401,13 +1401,23 @@ function renderRankTable(stocks, title, changeField, resetSort) {
   else if (title.indexOf('五日') >= 0) label = '5日涨幅';
   else if (title.indexOf('月度') >= 0) label = '月度涨幅';
   else if (title.indexOf('自定义') >= 0) label = '涨跌幅';
+  else if (title.indexOf('连板') >= 0) label = '连板数';
+  else if (title.indexOf('缩量回调') >= 0) label = '回撤幅度';
+  else if (title.indexOf('新高突破') >= 0) label = '量比';
   else if (title.indexOf('放量') >= 0) label = '换手率';
   else if (title.indexOf('强势精选') >= 0) label = '大涨天数';
   else if (title.indexOf('涨停天数排行') >= 0) label = '涨停天数';
   else if (title.indexOf('天数排行') >= 0) label = '大涨天数';
   th6[5].innerHTML = label + ' <span class="sort-arrow" id="sort_n_day_change"></span>';
-  if (th6.length >= 7 && (title.indexOf('天数排行') >= 0 || title.indexOf('强势精选') >= 0)) {
-   th6[6].innerHTML = (title.indexOf('涨停天数排行') >= 0 ? '大涨天数' : '占比') + ' <span class="sort-arrow" id="sort_volume_change_pct"></span>';
+  if (th6.length >= 7) {
+   var label2 = '量变率';
+   if (title.indexOf('涨停天数排行') >= 0) label2 = '大涨天数';
+   else if (title.indexOf('强势精选') >= 0) label2 = '占比';
+   else if (title.indexOf('连板') >= 0) label2 = '区间涨幅';
+   else if (title.indexOf('缩量回调') >= 0) label2 = '缩量比';
+   else if (title.indexOf('新高突破') >= 0) label2 = '区间涨幅';
+   else if (title.indexOf('天数排行') >= 0) label2 = '占比';
+   th6[6].innerHTML = label2 + ' <span class="sort-arrow" id="sort_volume_change_pct"></span>';
   }
  }
 
@@ -1433,14 +1443,27 @@ function renderRankTable(stocks, title, changeField, resetSort) {
   var extraChangeClass = extraVal > 0 ? 'change-up' : (extraVal < 0 ? 'change-down' : '');
   var isBigUpDays = changeField === 'big_up_days' || changeField === 'limit_up_days';
   var isLimitUpRank = changeField === 'limit_up_days';
+  var isBoards = changeField === 'boards';
+  var isVolRatio = changeField === 'vol_ratio';
+  var cell6;
+  if (isBigUpDays) cell6 = extraVal != null ? fmtNum(extraVal, 0) + '天' : '-';
+  else if (isBoards) cell6 = extraVal != null ? fmtNum(extraVal, 0) + '板' : '-';
+  else if (isVolRatio) cell6 = extraVal != null ? fmtNum(extraVal, 2) + '倍' : '-';
+  else cell6 = fmtPct(extraVal);
+  var cell7 = '-';
+  if (isLimitUpRank && s.big_up_days != null) cell7 = fmtNum(s.big_up_days, 0) + '天';
+  else if (isBigUpDays && s.big_up_ratio != null) cell7 = fmtNum(s.big_up_ratio, 1) + '%';
+  else if (isBoards && s.total_gain != null) cell7 = fmtPct(s.total_gain);
+  else if (title.indexOf('缩量回调') >= 0 && s.vol_shrink_ratio != null) cell7 = fmtNum(s.vol_shrink_ratio, 2);
+  else if (title.indexOf('新高突破') >= 0 && s.range_gain != null) cell7 = fmtPct(s.range_gain);
   return '<tr data-code="' + escapeHtml(s.code) + '" tabindex="0" style="cursor:pointer;">' +
   '<td>' + (i + 1) + '</td>' +
   '<td class="stock-code">' + escapeHtml(s.code) + '</td>' +
   '<td class="stock-name">' + escapeHtml(s.name) + '</td>' +
   '<td class="text-right">' + fmtNum(s.price, 2) + '</td>' +
   '<td class="text-right ' + changeClass + '">' + fmtPct(s.change_pct) + '</td>' +
-  '<td class="text-right ' + (isBigUpDays ? '' : extraChangeClass) + '">' + (isBigUpDays ? (extraVal != null ? fmtNum(extraVal, 0) + '天' : '-') : fmtPct(extraVal)) + '</td>' +
-  '<td class="text-right">' + (isLimitUpRank ? (s.big_up_days != null ? fmtNum(s.big_up_days, 0) + '天' : '-') : (isBigUpDays && s.big_up_ratio != null ? fmtNum(s.big_up_ratio, 1) + '%' : '-')) + '</td>' +
+  '<td class="text-right ' + ((isBigUpDays || isBoards || isVolRatio) ? '' : extraChangeClass) + '">' + cell6 + '</td>' +
+  '<td class="text-right">' + cell7 + '</td>' +
   '<td class="text-right">' + fmtNum(s.pe, 1) + '</td>' +
   '<td class="text-right">' + fmtNum(s.pb, 2) + '</td>' +
   '<td class="text-right">' + escapeHtml(fmtNum(s.market_cap, 0)) + '</td>' +
@@ -1531,6 +1554,27 @@ function screenLimitUpDays(el) {
  });
 }
 
+// 连板高度：截至最新交易日连续涨停 ≥2 板（按板块规则判定）
+function screenConsecutiveBoards(el) {
+ fetchRankingWithState('/api/screen/consecutive_limit_up?limit=100&min_boards=2', resolveScreenTarget(el, 'btnConsecutiveBoards'), function(data) {
+  renderRankTable(data.data, ' 连板高度（连续涨停≥2板·非ST）', 'boards');
+ });
+}
+
+// 缩量回调：涨停后回撤 5~15%，最新量能 ≤ 前5日均量 60%
+function screenShrinkPullback(el) {
+ fetchRankingWithState('/api/screen/shrink_pullback?limit=100', resolveScreenTarget(el, 'btnShrinkPullback'), function(data) {
+  renderRankTable(data.data, ' 缩量回调（涨停后回撤5-15%·量能≤5日均量60%）', 'pullback_pct');
+ });
+}
+
+// 20日新高突破：收盘创20日新高 + 量能 ≥ 前5日均量 1.5倍 + 当日涨幅 ≥1%
+function screenNewHighBreakout(el) {
+ fetchRankingWithState('/api/screen/new_high_breakout?limit=100', resolveScreenTarget(el, 'btnNewHighBreakout'), function(data) {
+  renderRankTable(data.data, ' 20日新高突破（放量≥1.5倍·涨幅≥1%）', 'vol_ratio');
+ });
+}
+
 // ── 高级筛选下拉：按选项 key 执行对应榜单 ──
 // el 为触发元素（下拉框）时用于置灰与状态提示；由按钮调用时回退到对应按钮
 function runAdvancedScreen(key, el) {
@@ -1542,6 +1586,9 @@ function runAdvancedScreen(key, el) {
   limitUpPullback: screenLimitUpPullback,
   bigUpDays: screenBigUpDays,
   limitUpDays: screenLimitUpDays,
+  consecutiveBoards: screenConsecutiveBoards,
+  shrinkPullback: screenShrinkPullback,
+  newHighBreakout: screenNewHighBreakout,
   strongPick: screenStrongPick
  };
  if (fns[key]) fns[key](el);

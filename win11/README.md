@@ -15,8 +15,13 @@ Windows 11 桌面版。使用系统自带的 **WebView2（Edge Chromium）** 通
 ## 构建
 ```bash
 cd win11
-python build_win11_webview.py
+../.venv-win11/Scripts/python.exe build_win11_webview.py
 ```
+> 构建环境固定为仓库根的 `.venv-win11`（Python 3.14.10，含 PyInstaller 与全部运行依赖）。
+> 脚本内部直接调用该环境的 `python -m PyInstaller`，不再用 `uv run --python 3.13`——
+> 那样会在 `.venv` 升级后临时解析出另一套解释器，打出的包与开发环境不一致。
+> `.venv-win11` 缺失时构建会直接报错退出；重建命令见仓库根 `requirements-freeze-venv-win11.txt`。
+
 产物：`dist/StockChart_Win11_{HighEnd,Brutalist,Sync}_v<构建日期>.exe`（同名旧版本自动清除），
 最新一份同时以稳定名复制到 `outputs/`，并复制到桌面 `StockChart_Win11/`。
 

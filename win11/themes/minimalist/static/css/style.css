@@ -269,6 +269,30 @@ body { padding-top: calc(var(--font-base) * 3.7); }
 
 .form-input::placeholder { color: #767676; }
 
+/* ===== 下拉框（自绘箭头，字号跟随 --font-base）===== */
+select.form-select {
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    background-image:
+        linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+        calc(100% - var(--font-base) * 1.15) calc(50% + 2px),
+        calc(100% - var(--font-base) * 0.75) calc(50% + 2px);
+    background-size: calc(var(--font-base) * 0.4) calc(var(--font-base) * 0.4);
+    background-repeat: no-repeat;
+    padding-right: calc(var(--font-base) * 2.4);
+    color-scheme: light;
+}
+select.form-select:hover { border-color: #333; }
+select.form-select option {
+    font-size: var(--font-base);
+    padding: calc(var(--font-base) * 0.45);
+    background: #fff;
+    color: #1a1a1a;
+}
+
 .form-row { display: flex; gap: 10px; }
 .form-row .form-group { flex: 1; }
 
@@ -605,8 +629,8 @@ body { padding-top: calc(var(--font-base) * 3.7); }
     display: block;
     width: 100%;
     margin-top: 10px;
-    padding: 9px 34px 9px 14px;
-    font-size: 13px;
+    padding: .65em 2.4em .65em 1em;
+    font-size: var(--font-base);
     color: #333;
     background-color: #fff;
     border: 1px solid #d0d7de;
@@ -614,9 +638,7 @@ body { padding-top: calc(var(--font-base) * 3.7); }
     cursor: pointer;
     outline: none;
     transition: border-color .15s ease, box-shadow .15s ease;
-    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
+    /* 箭头由上面的 select.form-select 规则统一绘制（currentColor，随字号缩放） */
 }
 #rankModeSelect:hover { border-color: #0969da; }
 #rankModeSelect:focus { border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,.15); }

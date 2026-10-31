@@ -226,6 +226,18 @@ class TestScreeningSQLRewrites:
             assert "big_up_days" in row and "total_days" in row
 
     def test_limit_up_pullback_shape(self, client):
+        import sqlite3
+
+        import common.config as cfg
+
+        conn = sqlite3.connect(cfg.DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO kline_data VALUES"
+            " (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("600000", "2024-03-01", 10, 10, 10.5, 9.5, 1e6, 1e7, 1.0, 1.2, 0.1, 1.0))
+        conn.commit()
+        conn.close()
+
         resp = client.get("/api/screen/limit_up_pullback")
         assert resp.status_code == 200
         body = resp.get_json()

@@ -227,7 +227,7 @@ body { padding-top: 54px; }
     color: #fff;
     padding: 10px 14px;
     border-radius: 8px;
-    font-size: 13px;
+    font-size: var(--font-base);
     transition: all 0.3s;
 }
 
@@ -235,10 +235,34 @@ body { padding-top: 54px; }
     outline: none;
     border-color: #e94560;
     box-shadow: 0 0 0 3px rgba(233,69,96,0.2);
-    background: rgba(255,255,255,0.08);
+    background-color: rgba(255,255,255,0.08);   /* longhand：保留下拉框箭头背景图 */
 }
 
 .form-input::placeholder { color: rgba(255,255,255,0.5); }
+
+/* ===== 下拉框（自绘箭头，字号跟随 --font-base）===== */
+select.form-select {
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    background-image:
+        linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+        calc(100% - var(--font-base) * 1.15) calc(50% + 2px),
+        calc(100% - var(--font-base) * 0.75) calc(50% + 2px);
+    background-size: calc(var(--font-base) * 0.4) calc(var(--font-base) * 0.4);
+    background-repeat: no-repeat;
+    padding-right: calc(var(--font-base) * 2.4);
+    color-scheme: dark;
+}
+select.form-select:hover { border-color: #e94560; }
+select.form-select option {
+    font-size: var(--font-base);
+    padding: calc(var(--font-base) * 0.45);
+    background: #1a1a2e;
+    color: #e8e8e8;
+}
 
 .form-row { display: flex; gap: 10px; }
 .form-row .form-group { flex: 1; }
@@ -409,10 +433,12 @@ body { padding-top: 54px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
 
 /* ===== 字号 ===== */
-body.font-small { font-size: 12px; }
-body.font-medium { font-size: 14px; }
-body.font-large { font-size: 16px; }
-body.font-extra-large { font-size: 18px; }
+/* 主题内所有 calc(var(--font-base)) 的间距/字号都跟着这四个类缩放 */
+:root { --font-base: 14px; }
+body.font-small { --font-base: 12px; font-size: 12px; }
+body.font-medium { --font-base: 14px; font-size: 14px; }
+body.font-large { --font-base: 16px; font-size: 16px; }
+body.font-extra-large { --font-base: 18px; font-size: 18px; }
 
 body.font-large .navbar { height: 60px; }
 body.font-extra-large .navbar { height: 64px; }
@@ -548,8 +574,8 @@ body.font-extra-large .navbar { height: 64px; }
     display: block;
     width: 100%;
     margin-top: 10px;
-    padding: 9px 34px 9px 14px;
-    font-size: 13px;
+    padding: .65em 2.4em .65em 1em;
+    font-size: var(--font-base);
     color: #e8e8f0;
     background-color: rgba(255,255,255,0.06);
     border: 1px solid rgba(255,255,255,0.15);
@@ -557,9 +583,7 @@ body.font-extra-large .navbar { height: 64px; }
     cursor: pointer;
     outline: none;
     transition: border-color .15s ease, box-shadow .15s ease;
-    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23aab' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
+    /* 箭头由上面的 select.form-select 规则统一绘制（currentColor，随字号缩放） */
 }
 #rankModeSelect:hover { border-color: #d4af37; }
 #rankModeSelect:focus { border-color: #d4af37; box-shadow: 0 0 0 3px rgba(212,175,55,.18); }

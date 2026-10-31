@@ -74,7 +74,7 @@
  </div>
  <div class="form-group">
  <label class="form-label">排序方式</label>
- <select class="form-input" id="sortOrder">
+ <select class="form-input form-select" id="sortOrder">
  <option value="default">默认排序</option>
  <option value="price_asc">价格从低到高</option>
  <option value="price_desc">价格从高到低</option>
@@ -140,7 +140,7 @@
  <div class="sidebar-title"> 高级筛选</div>
  <p class="muted-text" style="font-size:12px;margin-bottom:12px;">基于价量和K线形态选股<br><small>涨停判定：主板 10% / 创业板 20%</small></p>
  <div class="form-group" style="margin-bottom:0;">
- <select id="rankModeSelect" onchange="runAdvancedScreen(this.value, this)">
+ <select id="rankModeSelect" class="form-input form-select" onchange="runAdvancedScreen(this.value, this)">
  <option value="">选择筛选方式</option>
  <option value="firstLimitUp">首次涨停</option>
  <option value="limitUpVolume">涨停+放量2.5倍</option>
@@ -149,6 +149,9 @@
  <option value="limitUpPullback">涨停回调6-7%</option>
  <option value="bigUpDays">20日大涨天数排行</option>
  <option value="limitUpDays">20日涨停天数排行</option>
+ <option value="consecutiveBoards">连板高度排行</option>
+ <option value="shrinkPullback">涨停后缩量回调</option>
+ <option value="newHighBreakout">20日新高突破</option>
  <option value="strongPick">20日强势精选</option>
  </select>
  <p id="rankScreenStatus" class="muted-text" role="status" aria-live="polite" hidden></p>

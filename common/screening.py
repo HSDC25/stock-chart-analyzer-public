@@ -158,11 +158,20 @@ def compute_volume_change_pct(code: str, end_str: str = None) -> Optional[float]
 # Limit-up helpers
 # ---------------------------------------------------------------------------
 
+def limit_up_threshold(code: str) -> float:
+    """涨停阈值按板块区分：创业板/科创板 20%，主板 10%。
+
+    689 是科创板 CDR，和 688 同属 20% 档；漏掉它会让 10%~19.5% 的涨幅被误判成涨停。
+    此处与 screen_routes 里 SQL 的 ``LIKE '3%' / '688%' / '689%' / '302%'`` 保持一致。
+    """
+    if code.startswith('3') or code.startswith('688') or code.startswith('689'):
+        return LIMIT_UP_GEM
+    return LIMIT_UP_MAIN_BOARD
+
+
 def is_limit_up(code: str, pct_change: float) -> bool:
     """Return True if *pct_change* qualifies as limit-up for *code*'s board."""
-    if code.startswith('3') or code.startswith('688'):
-        return pct_change >= LIMIT_UP_GEM       # ChiNext / STAR: 20%
-    return pct_change >= LIMIT_UP_MAIN_BOARD     # Main board: 10%
+    return pct_change >= limit_up_threshold(code)
 
 
 def compute_limit_up_pullback(code: str, conn=None, db_path: str = None) -> Optional[dict]:
