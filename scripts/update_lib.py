@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -33,6 +34,10 @@ SHARED_ASSET_DIRS = ('assets/js',)
 
 
 def today_version() -> str:
+    """构建版本：默认当天日期；同一天发第二次 EXE 时用环境变量抬成四段。"""
+    override = os.environ.get('STOCKCHART_BUILD_VERSION', '').strip()
+    if override:
+        return override
     return _dt.date.today().strftime('%Y.%m.%d')
 
 

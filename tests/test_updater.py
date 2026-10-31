@@ -679,6 +679,37 @@ def test_restart_script_waits_then_swaps():
     assert updater.PLACEHOLDER == '-'
 
 
+def test_restart_script_clears_pyinstaller_env():
+    """换体脚本必须清掉继承来的 _PYI_* 变量。
+
+    冻结进程的 `_PYI_APPLICATION_HOME_DIR` 指向自己的 _MEI 解压目录；不清掉时
+    新进程复用一个即将被删除的目录，启动即报 Failed to load Python DLL。
+    """
+    script = updater._RESTART_BAT
+    for var in ('_PYI_APPLICATION_HOME_DIR', '_PYI_PARENT_PROCESS_LEVEL',
+                '_PYI_SPLASH_IPC', '_PYI_ARCHIVE_FILE', '_MEIPASS2'):
+        assert 'set "%s="' % var in script
+
+
+def test_launch_bat_scrubs_pyinstaller_env(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setenv('_PYI_APPLICATION_HOME_DIR', r'C:\Temp\_MEI123')
+    monkeypatch.setenv('_PYI_PARENT_PROCESS_LEVEL', '1')
+    monkeypatch.setenv('_MEIPASS2', r'C:\Temp\_MEI123')
+    monkeypatch.setattr(updater.subprocess, 'Popen', fake_popen)
+
+    bat = updater._launch_bat(tmp_path, 999999, 999998,
+                              tmp_path / 'StockChart.exe', str(tmp_path / 'new.exe'))
+    assert bat.exists()
+    env = captured['env']
+    assert not [k for k in env if k.startswith('_PYI_') or k == '_MEIPASS2']
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='换体脚本是 Windows 批处理')
 def test_launch_bat_really_swaps_the_exe(tmp_path):
     """真跑一次脱离进程的换体脚本。

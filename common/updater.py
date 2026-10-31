@@ -68,8 +68,16 @@ _live_app = None  # type: object | None      # 正在服务的 Flask 实例，�
 _live_app_template_subdir = 'templates'
 
 # ── bat template: wait for this process to leave, then swap and relaunch
+# 必须清掉 PyInstaller onefile 的运行期环境变量：换体脚本从冻结进程继承
+# `_PYI_APPLICATION_HOME_DIR` 等变量后，新进程会复用旧进程的 _MEI 解压目录，
+# 而该目录已随旧进程退出被清理，表现为启动报 "Failed to load Python DLL"。
 _RESTART_BAT = """@echo off
 setlocal
+set "_PYI_APPLICATION_HOME_DIR="
+set "_PYI_PARENT_PROCESS_LEVEL="
+set "_PYI_SPLASH_IPC="
+set "_PYI_ARCHIVE_FILE="
+set "_MEIPASS2="
 set "MYPID=%~1"
 set "PPID=%~2"
 set "EXE=%~3"
@@ -789,6 +797,19 @@ def _writable_exe_dir(exe):
     return True
 
 
+def _relaunch_env():
+    # type: () -> dict
+    """Environment for the swap script: drop PyInstaller runtime variables.
+
+    A frozen onefile process carries ``_PYI_APPLICATION_HOME_DIR`` pointing at
+    its own ``_MEI*`` extraction dir.  If the relaunched EXE inherits it, the
+    bootloader reuses that dir; the old process cleans it up on exit, so the
+    new process fails with ``Failed to load Python DLL``.
+    """
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith('_PYI_') and k != '_MEIPASS2'}
+
+
 def _launch_bat(exe_dir, my_pid, ppid, exe_path, new_exe):
     # type: (Path, int, int, Path, str) -> Path
     """Write the detached swap-and-relaunch batch file."""
@@ -809,6 +830,7 @@ def _launch_bat(exe_dir, my_pid, ppid, exe_path, new_exe):
         flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
     subprocess.Popen(  # nosec B603 - 固定调用本机 cmd，参数均为本地路径
         cmd, cwd=str(exe_dir), creationflags=flags, close_fds=True,
+        env=_relaunch_env(),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return bat

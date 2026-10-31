@@ -27,8 +27,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / 'update_dist' / 'update.json'
-DEFAULT_KEY = Path.home() / '.ssh' / 'HSDC.pem'
-DEFAULT_HOST = os.environ.get('STOCKCHART_PUBLISH_HOST', '')
+DEFAULT_KEY = Path.home() / '.ssh' / 'id_ed25519_ubuntu'
+# 2026-10-19 整站迁移：data.hsdc.cloud 已切到 81（新机），旧机 129 停止服务
+DEFAULT_HOST = os.environ.get('STOCKCHART_PUBLISH_HOST', 'ubuntu@81.71.134.71')
 DEFAULT_REMOTE_DIR = '/var/www/stockdata/updates'
 # 清单里的文件名要拼进 ssh 命令，只放行普通文件名字符
 SAFE_NAME = re.compile(r'^[\w][\w.\-]*$')

@@ -124,8 +124,15 @@ def build_theme(theme_dir: str, launcher: str, name: str) -> bool:
     print(f"{'='*60}")
 
     # 构建 PyInstaller 命令
+    # 固定使用仓库根的 .venv-win11（当前 Python 3.14.10）里的 PyInstaller：
+    # 原先写死 `uv run --python 3.13 pyinstaller`，在 .venv 升级后会
+    # 临时解析出另一套解释器，打出来的包与开发环境不一致。
+    pyinstaller_py = ROOT.parent / '.venv-win11' / 'Scripts' / 'python.exe'
+    if not pyinstaller_py.exists():
+        print(f"\n[FAIL] 找不到构建环境: {pyinstaller_py}")
+        return False
     cmd = [
-        'uv', 'run', '--python', '3.13', 'pyinstaller',
+        str(pyinstaller_py), '-m', 'PyInstaller',
         '--clean',
         '--noconfirm',
         '--onefile',
