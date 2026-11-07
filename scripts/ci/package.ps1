@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     顺序与手工发布一致（scripts/publish_update.py / republish_update.py）：
-      1. 构建 win11 变体（用 .venv-win11 里的 PyInstaller）
+      1. 构建 7 个变体（win7 普通/browser 各 32/64 + win11 三个主题）
       2. signtool 签名 outputs\*.exe（证书在用户证书存储，或 -PfxPath / 环境变量）
       3. publish_update.py 打 UI 包 + 给 zip 做 detached 签名 + 写 update.json
       4. -Publish 时再调 republish_update.py 上传（会先复核 sha 与签名）
@@ -87,22 +87,45 @@ $python = Resolve-Python -Explicit $Python
 Write-Host "[ci] 使用解释器: $python"
 
 # 1. 构建
+# 清单里有 7 个变体：win7 4 个（普通 + browser，各 32/64）+ win11 3 个。
+# 只构建 win11 会把上一版 win7 的 exe 混进新清单，所以三个脚本都要跑。
 if (-not $SkipBuild) {
-    Write-Host "`n[1/3] 构建 win11 变体（最慢的一步，通常 5~15 分钟）"
-    & $python (Join-Path $repo 'win11\build_win11_webview.py')
-    if ($LASTEXITCODE -ne 0) { throw "构建失败（exit $LASTEXITCODE）" }
+    Write-Host "`n[1/3] 构建 7 个变体（最慢的一步，通常 15~30 分钟）"
+    foreach ($script in @('win7\build_win7.py',
+                          'win7\build_win7_browser.py',
+                          'win11\build_win11_webview.py')) {
+        Write-Host "[1/3] 运行 $script"
+        & $python (Join-Path $repo $script)
+        if ($LASTEXITCODE -ne 0) { throw "构建失败：$script（exit $LASTEXITCODE）" }
+    }
 } else {
     Write-Host "`n[1/3] 跳过构建（-SkipBuild）"
 }
 
-$exeDir = Join-Path $repo 'win11\outputs'
-$exes = @(Get-ChildItem $exeDir -Filter *.exe -ErrorAction SilentlyContinue)
-if (-not $exes.Count) { throw "没有找到可发布的 exe（$exeDir），先跑一次构建" }
+$outDirs = @((Join-Path $repo 'win7\outputs'), (Join-Path $repo 'win11\outputs'))
+foreach ($dir in $outDirs) {
+    if (-not (Get-ChildItem $dir -Filter *.exe -ErrorAction SilentlyContinue)) {
+        throw "没有找到可发布的 exe（$dir），先跑一次构建"
+    }
+}
+# 清单是按 sidecar json 收集的，少一个就会漏发一个变体
+$expected = @('StockChart_Win7_32', 'StockChart_Win7_32_browser',
+              'StockChart_Win7_64', 'StockChart_Win7_64_browser',
+              'StockChart_Win11_Brutalist', 'StockChart_Win11_HighEnd',
+              'StockChart_Win11_Sync')
+$missing = @($expected | Where-Object {
+    $hit = $false
+    foreach ($dir in $outDirs) {
+        if (Test-Path (Join-Path $dir ($_ + '.json'))) { $hit = $true }
+    }
+    -not $hit
+})
+if ($missing.Count) { throw "缺少这些变体的产物（先跑一次完整构建）：$($missing -join ', ')" }
 
 # 2. 签名
 if (-not $SkipSign) {
     Write-Host "`n[2/3] 代码签名（Authenticode）"
-    $signArgs = @('-Paths', $exeDir)
+    $signArgs = @('-Paths') + $outDirs
     if ($env:STOCKCHART_SIGN_PFX) {
         $signArgs += @('-PfxPath', $env:STOCKCHART_SIGN_PFX)
         Write-Host "[ci] 使用 PFX: $env:STOCKCHART_SIGN_PFX"
