@@ -39,10 +39,17 @@ object Tests : BuildType({
         root(StockChartLocal)
     }
 
+    params {
+        // 代理跑在 LocalSystem 下，PATH 里未必有系统 Python：显式指定带 pytest 的解释器
+        text("env.STOCKCHART_TEST_PYTHON",
+             "C:/Users/ASUS/AppData/Local/Programs/Python/Python314/python.exe",
+             label = "测试用 Python", allowEmpty = true)
+    }
+
     steps {
         script {
             name = "pytest"
-            scriptContent = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\ci\run_tests.ps1"
+            scriptContent = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/ci/run_tests.ps1"
         }
     }
 
@@ -80,6 +87,11 @@ object Release : BuildType({
     }
 
     params {
+        // 发布在本地工作副本里跑：构建用的 .venv-win11 / win7 python 运行时不在 git 里，
+        // 代理的干净检出目录里没有它们。这里直接指向本机仓库。
+        text("repo.path", "C:/Users/ASUS/.qoderworkcn/workspace/mqxnujmu7xwpkdh9",
+             label = "本地仓库路径")
+
         // 更新说明（显示在客户端版本徽章里）
         text("release.notes", "", label = "更新说明",
              description = "写进 update.json 的 notes，显示在版本徽章提示里",
@@ -91,7 +103,7 @@ object Release : BuildType({
 
         // 签名材料（不进 git）：路径是公开信息，口令必须是 Password 类型
         text("env.STOCKCHART_SIGN_PFX",
-             "C:\ProgramData\StockChart\secrets\stockchart-codeSigning.pfx",
+             "C:/ProgramData/StockChart/secrets/stockchart-codeSigning.pfx",
              label = "代码签名 PFX 路径", allowEmpty = true)
         password("env.STOCKCHART_SIGN_PFX_PASSWORD", "",
                  label = "PFX 口令",
@@ -102,7 +114,7 @@ object Release : BuildType({
 
         // 上传用的 SSH 私钥
         text("env.STOCKCHART_PUBLISH_KEY",
-             "C:\ProgramData\StockChart\secrets\id_ed25519_ubuntu",
+             "C:/ProgramData/StockChart/secrets/id_ed25519_ubuntu",
              label = "发布用 SSH 私钥路径", allowEmpty = true)
         text("env.STOCKCHART_PUBLISH_HOST",
              "ubuntu@81.71.134.71",
@@ -111,12 +123,8 @@ object Release : BuildType({
 
     steps {
         script {
-            name = "构建 + 签名 + 生成清单"
-            scriptContent = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\ci\package.ps1 -Notes \"%release.notes%\" -UiVersion \"%release.ui_version%\""
-        }
-        script {
-            name = "上传到更新服务器"
-            scriptContent = "python scripts\republish_update.py --key \"%env.STOCKCHART_PUBLISH_KEY%\" --host \"%env.STOCKCHART_PUBLISH_HOST%\""
+            name = "构建 + 签名 + 生成清单 + 上传"
+            scriptContent = "pwsh -NoProfile -ExecutionPolicy Bypass -File \"%repo.path%/scripts/ci/package.ps1\" -Notes \"%release.notes%\" -UiVersion \"%release.ui_version%\" -Publish"
         }
     }
 

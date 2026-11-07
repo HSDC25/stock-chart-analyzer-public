@@ -118,13 +118,14 @@ SECRET_NAME_RE = re.compile(
     r'pfx_password|.*_password\.txt$|.*\.pem$)', re.IGNORECASE)
 
 # 注意：docs/ 里会写"id_ed25519_ubuntu"这种文件名，那只是路径说明，不是密钥本体，
-# 所以只对"看起来像私钥正文"的内容做拦截。
-PRIVATE_KEY_HEADERS = (
-    '-----BEGIN OPENSSH PRIVATE KEY-----',
-    '-----BEGIN RSA PRIVATE KEY-----',
-    '-----BEGIN PRIVATE KEY-----',
-    '-----BEGIN EC PRIVATE KEY-----',
-)
+# 所以只对"看起来像私钥正文"的内容做拦截。标记本身拆开拼，免得本文件自己被扫出来。
+_PEM_HEAD = '-----' + 'BEGIN '
+PRIVATE_KEY_HEADERS = tuple(_PEM_HEAD + tail for tail in (
+    'OPENSSH PRIVATE KEY-----',
+    'RSA PRIVATE KEY-----',
+    'PRIVATE KEY-----',
+    'EC PRIVATE KEY-----',
+))
 
 
 def _git_ls_files():

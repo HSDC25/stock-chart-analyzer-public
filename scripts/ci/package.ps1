@@ -2,16 +2,19 @@
 <#
 .SYNOPSIS
     「发布准备」脚本：构建 EXE → 代码签名 → 生成带签名的 update.json。
-    只准备产物，不上传（上传会立刻对所有客户端生效，必须人工确认）。
+    默认只准备产物，不上传（上传会立刻对所有客户端生效）。
 
 .DESCRIPTION
     顺序与手工发布一致（scripts/publish_update.py / republish_update.py）：
       1. 构建 win11 变体（用 .venv-win11 里的 PyInstaller）
       2. signtool 签名 outputs\*.exe（证书在用户证书存储，或 -PfxPath / 环境变量）
       3. publish_update.py 打 UI 包 + 给 zip 做 detached 签名 + 写 update.json
+      4. -Publish 时再调 republish_update.py 上传（会先复核 sha 与签名）
 
     -SkipBuild  跳过编译，用 outputs\ 里已有的 exe 只重签/重出清单（快速验证）
     -SkipSign   跳过签名（只适合本机调试，产物不能对外发布）
+    -Publish    生成清单后直接上传（TeamCity 发布流水线用）
+    -DryRun     配合 -Publish：只校验不真传
 
     签名材料也可以用环境变量（适合非交互/CI）：
       STOCKCHART_SIGN_PFX               PFX 路径
@@ -31,7 +34,11 @@ param(
     # 界面包单独定版（同一天二次发界面时必须抬一位，如 2026.10.05.2）
     [string]$UiVersion = '',
     [string]$Python,
-    [string]$OutDir = 'update_dist'
+    [string]$OutDir = 'update_dist',
+    # 生成清单后直接上传到更新服务器（TeamCity 发布流水线用；上传即对所有客户端生效）
+    [switch]$Publish,
+    # 配合 -Publish：只校验不真传，用来演练上传步骤
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +61,12 @@ if (-not $env:STOCKCHART_SIGN_PFX_PASSWORD) {
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 Set-Location $repo
 Write-Host "[ci] 仓库: $repo"
+# 发布在本地工作副本里跑（构建用的 venv 不在 git 里），把当前提交打出来方便对账
+$head = (& git -C $repo rev-parse --short HEAD 2>$null)
+if ($LASTEXITCODE -eq 0 -and $head) {
+    $dirty = (& git -C $repo status --porcelain 2>$null)
+    Write-Host ("[ci] 当前提交: $head" + $(if ($dirty) { '（工作副本有未提交改动）' } else { '' }))
+}
 
 function Resolve-Python {
     param([string]$Explicit)
@@ -122,4 +135,20 @@ if ($unsigned.Count) {
 }
 
 Write-Host "`n[OK] 发布产物已就绪：$manifest"
-Write-Host "     人工确认后上传：$python scripts\republish_update.py"
+
+if (-not $Publish) {
+    Write-Host "     人工确认后上传：$python scripts\republish_update.py"
+    return
+}
+
+# 4. 上传：republish_update.py 会再核一遍 sha 与签名，任何一个变体不对就中止
+Write-Host "`n[4/4] 上传到更新服务器"
+$republishArgs = @((Join-Path $repo 'scripts\republish_update.py'))
+if ($DryRun) { $republishArgs += '--dry-run' }
+& $python $republishArgs
+if ($LASTEXITCODE -ne 0) { throw "上传失败（exit $LASTEXITCODE）" }
+if ($DryRun) {
+    Write-Host '[dry-run] 校验通过，没有上传'
+} else {
+    Write-Host '[OK] 已上传并生效'
+}

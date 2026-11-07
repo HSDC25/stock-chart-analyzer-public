@@ -103,11 +103,15 @@ icacls "C:\ProgramData\StockChart\secrets" /inheritance:r `
   故意不支持 5.1）
 - **带 pytest 的 Python**：`scripts/ci/run_tests.ps1` 会自己找
   `STOCKCHART_TEST_PYTHON` → PATH 上的 `python` → `.venv-win11` → `.venv`，
-  逐个试 `import pytest`，找到就用
+  逐个试 `import pytest`，找到就用。团队配置里已经把 `env.STOCKCHART_TEST_PYTHON`
+  设成 `C:\Users\ASUS\AppData\Local\Programs\Python\Python314\python.exe`，
+  因为代理是 LocalSystem，系统 PATH 里不一定有 `python`。
 
 发布流水线额外需要 `.venv-win11`（PyInstaller）与 `win7\python38-*`（构建 win7 变体），
-这两个目录被 `.gitignore` 排除了，只存在于本机工作副本里。**因此发布流水线只在这台机器上能跑通**，
-这也是它保持手动的另一个原因。
+这两个目录被 `.gitignore` 排除了，只存在于本机工作副本里。**所以发布步骤不在代理的
+干净检出目录里跑**：DSL 里的 `repo.path` 参数直接指向本机仓库，构建步骤调用的是
+`%repo.path%\scripts\ci\package.ps1`。这也是"发布仍在本机执行"的落地方式——
+TeamCity 只负责触发、排队和留日志。
 
 首次发布前先确认代理能读：
 
@@ -141,8 +145,16 @@ TeamCity 的 VCS Trigger 在 60 秒内（quiet period）自动起一次 `测试�
    → 写 `update_dist\update.json` → 校验 sha/签名 → 上传到 `data.hsdc.cloud`
 5. 构建页面的 **Artifacts** 里能下载 `update_dist/*` 留档
 
+> 发布步骤在**本机工作副本**里执行（日志开头会打印当前提交与是否有未提交改动）。
+> 所以点 Run 之前请确认工作副本和要发的提交一致。
 > 上传前 `republish_update.py` 会逐个核对 sha256 与签名，任何一个变体 `ui_sig` 为空就中止，
 > 不会把坏清单推给客户端。
+
+想先演练上传而不真发（只校验，不连服务器）：在本机跑
+
+```powershell
+pwsh -NoProfile -File scripts\ci\package.ps1 -SkipBuild -SkipSign -Publish -DryRun
+```
 
 ## 五、排错
 
