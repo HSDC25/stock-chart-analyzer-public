@@ -62,14 +62,29 @@ function Resolve-Python {
 
 $python = Resolve-Python -Explicit $Python
 
+# 签名相关用例需要一张可用的代码签名证书。代理跑在 LocalSystem 下看不到 ASUS 的
+# 用户证书库，会整组 skip；能读到本机密钥库里的 PFX 就改走 PFX，让这条链路也进 CI。
+if (-not $env:STOCKCHART_SIGN_PFX) {
+    $defaultPfx = 'C:\ProgramData\StockChart\secrets\stockchart-codeSigning.pfx'
+    if (Test-Path $defaultPfx) {
+        $env:STOCKCHART_SIGN_PFX = $defaultPfx
+        $pwFile = 'C:\ProgramData\StockChart\secrets\pfx_password.txt'
+        if (-not $env:STOCKCHART_SIGN_PFX_PASSWORD -and (Test-Path $pwFile)) {
+            $env:STOCKCHART_SIGN_PFX_PASSWORD = (Get-Content $pwFile -Raw).Trim()
+        }
+        Write-Host "[ci] 签名用例使用 PFX: $defaultPfx"
+    }
+}
+
 if (-not (Test-Path $ReportDir)) {
     New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
 }
 $reportPath = Join-Path (Resolve-Path $ReportDir) 'pytest.xml'
 
 # -p no:cacheprovider：CI 工作区可能只读，别让 .pytest_cache 写失败刷警告
-Write-Host "[ci] $python -m pytest tests -q -p no:cacheprovider --junitxml=$reportPath"
-& $python -m pytest tests -q -p no:cacheprovider "--junitxml=$reportPath"
+# -rs：把 skip 原因打出来，省得在 CI 里猜哪几条没跑
+Write-Host "[ci] $python -m pytest tests -q -rs -p no:cacheprovider --junitxml=$reportPath"
+& $python -m pytest tests -q -rs -p no:cacheprovider "--junitxml=$reportPath"
 $code = $LASTEXITCODE
 
 if (Test-Path $reportPath) {
