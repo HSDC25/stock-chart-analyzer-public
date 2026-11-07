@@ -149,3 +149,5 @@ if ($untrusted) {
     Write-Host '提示：在目标机（管理员）执行 .\scripts\trust_signing_cert.ps1 后，verify /pa 才会通过。'
     Write-Host '      SmartScreen 的「未知发布者」提示仍会出现——自签证书无法消除，那需要商业代码签名证书。'
 }
+# 自签证书在未装根的机器上 verify /pa 必然返回 1，那是预期；别让它变成脚本退出码
+exit 0

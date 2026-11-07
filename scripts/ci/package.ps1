@@ -125,15 +125,17 @@ if ($missing.Count) { throw "缺少这些变体的产物（先跑一次完整构
 # 2. 签名
 if (-not $SkipSign) {
     Write-Host "`n[2/3] 代码签名（Authenticode）"
-    $signArgs = @('-Paths') + $outDirs
+    # 用具名哈希表 splat：数组 splat 会让 -Paths 后面的第二个路径被当成位置参数，
+    # 绑定到 -PfxPassword（SecureString）上，报类型转换错误。
+    $signParams = @{ Paths = $outDirs }
     if ($env:STOCKCHART_SIGN_PFX) {
-        $signArgs += @('-PfxPath', $env:STOCKCHART_SIGN_PFX)
+        $signParams.PfxPath = $env:STOCKCHART_SIGN_PFX
         Write-Host "[ci] 使用 PFX: $env:STOCKCHART_SIGN_PFX"
     }
     if ($env:STOCKCHART_SIGN_SUBJECT) {
-        $signArgs += @('-Subject', $env:STOCKCHART_SIGN_SUBJECT)
+        $signParams.Subject = $env:STOCKCHART_SIGN_SUBJECT
     }
-    & (Join-Path $repo 'scripts\sign_executables.ps1') @signArgs
+    & (Join-Path $repo 'scripts\sign_executables.ps1') @signParams
     if ($LASTEXITCODE -ne 0) { throw "签名失败（exit $LASTEXITCODE）" }
 } else {
     Write-Warning '[2/3] 跳过签名（-SkipSign）：这样的包客户端会拒收，只能本机调试'
