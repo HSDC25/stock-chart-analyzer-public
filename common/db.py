@@ -333,18 +333,41 @@ def read_last_bars_batch(codes, n, end_date_str, db_path=None):
         try:
             placeholders = ','.join('?' for _ in codes)
             cursor = conn.cursor()
-            cursor.execute(
-                '''SELECT code, close, volume FROM kline_data
-                   WHERE code IN ({}) AND date <= ?
-                   ORDER BY code, date DESC'''.format(placeholders),
-                list(codes) + [end_date_str],
-            )
-            # Group rows by code, keep only the first n per code
+            params = list(codes) + [end_date_str]
+            try:
+                # 把"每股只取最近 n 根"下推到 SQL：旧实现 fetchall 整段历史再在
+                # Python 里截断，代码越多、历史越长，白搬的行越多。窗口函数让
+                # 传输量收敛到 n*len(codes)（需 SQLite >= 3.25）。
+                cursor.execute(
+                    '''SELECT code, close, volume FROM (
+                           SELECT code, close, volume,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY code ORDER BY date DESC) AS rn
+                           FROM kline_data
+                           WHERE code IN ({}) AND date <= ?
+                       ) WHERE rn <= ?
+                       ORDER BY code, date DESC'''.format(placeholders),
+                    params + [n],
+                )
+                rows = cursor.fetchall()
+            except sqlite3.OperationalError:
+                # 老 SQLite 无窗口函数：退回全量读取 + Python 截断
+                cursor.execute(
+                    '''SELECT code, close, volume FROM kline_data
+                       WHERE code IN ({}) AND date <= ?
+                       ORDER BY code, date DESC'''.format(placeholders),
+                    params,
+                )
+                grouped = {}  # type: Dict[str, List]
+                for row_code, close_val, vol_val in cursor.fetchall():
+                    bucket = grouped.setdefault(row_code, [])
+                    if len(bucket) < n:
+                        bucket.append((close_val, vol_val))
+                rows = [(c, cv, vv) for c, bucket in grouped.items()
+                        for cv, vv in bucket]
             grouped = {}  # type: Dict[str, List]
-            for row_code, close_val, vol_val in cursor.fetchall():
-                bucket = grouped.setdefault(row_code, [])
-                if len(bucket) < n:
-                    bucket.append((close_val, vol_val))
+            for row_code, close_val, vol_val in rows:
+                grouped.setdefault(row_code, []).append((close_val, vol_val))
         finally:
             if close_after:
                 conn.close()

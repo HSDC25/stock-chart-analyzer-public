@@ -60,6 +60,22 @@ class ThreadSafeCache:
             self._data = value
             self._timestamp = datetime.now()
 
+    def get_if_fresh(self):
+        """一次取回 ``(是否新鲜, 值)``，避免 is_valid 与读取之间的竞态。
+
+        分开调 ``is_valid`` 再读 ``_data`` 时，另一线程可能刚好在两步之间 clear，
+        结果拿到 None。需要"只读、不回源"时用这个。
+        """
+        with self._lock:
+            if self._is_fresh():
+                return True, self._data
+            return False, None
+
+    def peek(self) -> Any:
+        """读取当前值（不看 TTL、不加锁外露），供只读访问器使用。"""
+        with self._lock:
+            return self._data
+
     def invalidate(self) -> None:
         """Clear the cached value."""
         with self._lock:
@@ -108,6 +124,16 @@ class ThreadSafeDictCache:
         with self._lock:
             self._data[key] = value
             self._timestamps[key] = datetime.now()
+
+    def peek(self, key: str) -> Any:
+        """按 key 读取，过期视为未命中；只读，不触发 fetch、不刷新 TTL。"""
+        with self._lock:
+            ts = self._timestamps.get(key)
+            if key not in self._data or ts is None:
+                return None
+            if (datetime.now() - ts).total_seconds() >= self._ttl:
+                return None
+            return self._data[key]
 
     def invalidate(self, key: Optional[str] = None) -> None:
         """Invalidate a single key, or the entire cache when *key* is None."""

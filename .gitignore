@@ -13,10 +13,13 @@ dist/
 outputs/
 
 # ── 自动更新发布产物与代码签名材料（PFX 含私钥，绝不入库）──
+# 真实密钥在 C:\ProgramData\StockChart\secrets，仓库里只留公钥证书
 update_dist/
 signing/
 *.pfx
+*.p12
 *.cer
+pfx_password*
 
 # ── Win7 内嵌 Python 运行时（体积大，由构建脚本重建）──
 win7/python38-amd64/
@@ -33,6 +36,11 @@ win7/win7_runtime/
 *.bak2
 *.security_bak
 *.log
+# 发版/构建前的人工快照（动辄上 GB，只在本地留档）
+.release-backup-*/
+build.old-*/
+win7/build.old-*/
+win11/build.old-*/
 
 # ── 仓库根的一次性脚本与临时产物（带 / 前缀，避免误伤 tests/）──
 /nul
@@ -58,6 +66,7 @@ vibe_images/
 docs/安全审计_完整版.md
 docs/安全修复_TODO.md
 docs/审计_*.md
+docs/域名与源站安全排查报告_*.md
 docs/ACCEPTED_RISKS.md
 docs/FIX_PLAN.md
 *.aux

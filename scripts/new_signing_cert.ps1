@@ -38,7 +38,8 @@ if (-not $PfxPassword) {
 }
 
 # 1. 已有证书还够用就复用（同一台构建机上保持稳定身份，目标机只需信任一次）
-$existing = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+$existing = Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object { $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3' } |
             Where-Object { $_.Subject -eq $Subject } |
             Sort-Object NotAfter -Descending | Select-Object -First 1
 if ($existing -and ($existing.NotAfter - (Get-Date)).Days -gt $RenewWhenDaysLeft) {

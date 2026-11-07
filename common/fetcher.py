@@ -21,6 +21,7 @@ import random  # nosec B311 - anti-blocking UA rotation & retry jitter only
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -47,7 +48,7 @@ bs = _LazyBaostock()
 
 # Internal
 from common.cache import ThreadSafeCache, ThreadSafeDictCache
-from common.config import CACHE_TTL_SECONDS, DB_PATH
+from common.config import CACHE_TTL_SECONDS, DB_PATH, validate_url
 from common.db import (
     get_kline_from_db as _get_kline_from_db,
     is_data_fresh as _is_data_fresh,
@@ -169,11 +170,25 @@ def random_browser_headers(referer: str = None) -> dict:
 # HTTP keep-alive helpers
 # ============================================================================
 
+def _reject_private_redirects(resp, *args, **kwargs):
+    """requests 的 response 钩子：每一跳重定向都重新过一遍 SSRF 校验。
+
+    ``allow_redirects=True`` 时最终 resp.url 可能是内网地址（重定向是绕过发请求前
+    校验的常见手法），history 里每一跳都要查，查不过就抛 ValueError 让调用方失败。
+    """
+    for hop in list(resp.history) + [resp]:
+        validate_url(hop.url)
+    return resp
+
+
 def http_get_keepalive(url: str, headers: dict, provider: str, timeout: int = 15) -> bytes:
     """Fetch *url* using a thread-local ``requests.Session`` (keep-alive).
 
     On failure the session is torn down so the next call creates a fresh one.
     """
+    # requests 不走 urllib 的补丁，发请求前必须自己过 SSRF 校验（与 urllib 通道对齐）
+    validate_url(url)
+
     if not hasattr(kline_conn_local, "sessions"):
         kline_conn_local.sessions = {}
 
@@ -194,7 +209,8 @@ def http_get_keepalive(url: str, headers: dict, provider: str, timeout: int = 15
         kline_conn_local.sessions[provider] = s
 
     try:
-        resp = s.get(url, headers=headers, timeout=(5, timeout), allow_redirects=True)
+        resp = s.get(url, headers=headers, timeout=(5, timeout), allow_redirects=True,
+                     hooks={'response': _reject_private_redirects})
         resp.raise_for_status()
         return resp.content
     except Exception:
@@ -635,36 +651,35 @@ def fetch_realtime_tencent_to_db(codes: list, on_progress=None) -> int:
     written = 0
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    cursor = conn.cursor()
+    with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
+        cursor = conn.cursor()
 
-    for i in range(0, total, batch_size):
-        if i > 0:
-            time.sleep(0.5)
-        chunk = secids[i:i + batch_size]
-        items = fetch_realtime_tencent_batch(chunk)
+        for i in range(0, total, batch_size):
+            if i > 0:
+                time.sleep(0.5)
+            chunk = secids[i:i + batch_size]
+            items = fetch_realtime_tencent_batch(chunk)
 
-        rows = []
-        for it in items:
-            rows.append((
-                it["code"], it["name"], it["price"], it["change_pct"],
-                it["pe"], it["pb"], it["market_cap"], it["volume"], now_str,
-            ))
+            rows = []
+            for it in items:
+                rows.append((
+                    it["code"], it["name"], it["price"], it["change_pct"],
+                    it["pe"], it["pb"], it["market_cap"], it["volume"], now_str,
+                ))
 
-        if rows:
-            cursor.executemany(
-                "INSERT OR REPLACE INTO stock_metadata"
-                " (code, name, price, change_pct, pe, pb, market_cap, volume, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-            written += len(rows)
+            if rows:
+                cursor.executemany(
+                    "INSERT OR REPLACE INTO stock_metadata"
+                    " (code, name, price, change_pct, pe, pb, market_cap, volume, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                written += len(rows)
 
-        if on_progress:
-            on_progress(min(i + batch_size, total), total)
+            if on_progress:
+                on_progress(min(i + batch_size, total), total)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
     return written
 
 
@@ -684,7 +699,9 @@ def _get_kline_baostock_standalone(code: str, days: int = 5) -> pd.DataFrame:
 
         bs_code = "sh.{}".format(code) if code.startswith("6") else "sz.{}".format(code)
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=15)
+        # 日历窗口放宽到 days*2+5 以覆盖周末/节假日，与 get_kline_baostock 一致；
+        # 之前写死 15 天且 tail(5)，调用方传 days=30 时只能拿回 5 根
+        start_date = end_date - timedelta(days=days * 2 + 5)
 
         rs = bs.query_history_k_data_plus(
             bs_code,
@@ -717,8 +734,8 @@ def _get_kline_baostock_standalone(code: str, days: int = 5) -> pd.DataFrame:
         df["amplitude"] = None
         df["change"] = None
         df = df.sort_values("date").reset_index(drop=True)
-        if len(df) > 5:
-            df = df.tail(5).reset_index(drop=True)
+        if len(df) > days:
+            df = df.tail(days).reset_index(drop=True)
         return df
     except Exception as e:
         logger.error("Standalone baostock fetch %s failed: %s", code, e)
@@ -753,12 +770,11 @@ class StockDataFetcher:
     @property
     def stock_list_cached_value(self):
         """Raw cached stock list DataFrame (or None)."""
-        return self._stock_list_cache._data
+        return self._stock_list_cache.peek()
 
     @stock_list_cached_value.setter
     def stock_list_cached_value(self, value):
-        self._stock_list_cache._data = value
-        self._stock_list_cache._timestamp = datetime.now() if value is not None else None
+        self._stock_list_cache.set(value)
 
     def invalidate_stock_list_cache(self):
         # type: () -> None
@@ -857,8 +873,10 @@ class StockDataFetcher:
         Priority: SQLite ``stock_metadata`` table (instant) > baostock (slow).
         Results are cached for ``CACHE_TTL_SECONDS``.
         """
-        if not refresh and self._stock_list_cache.is_valid:
-            return self._stock_list_cache._data
+        if not refresh:
+            fresh, cached = self._stock_list_cache.get_if_fresh()
+            if fresh:
+                return cached
 
         # --- Try SQLite metadata first ---
         try:
@@ -870,8 +888,7 @@ class StockDataFetcher:
                 df = df[df["code"].apply(is_allowed_stock_code)].reset_index(drop=True)
                 df = df[~df["name"].apply(is_stock_st)].reset_index(drop=True)
                 df["turnover"] = 0.0
-                self._stock_list_cache._data = df
-                self._stock_list_cache._timestamp = datetime.now()
+                self._stock_list_cache.set(df)
                 return df
         except Exception as e:
             logger.info("[get_stock_list] metadata read failed, falling back to baostock: %s", e)
@@ -926,8 +943,7 @@ class StockDataFetcher:
                     df["pb"] = 0.0
                     df["market_cap"] = 0.0
                     df["volume"] = 0.0
-                    self._stock_list_cache._data = df
-                    self._stock_list_cache._timestamp = datetime.now()
+                    self._stock_list_cache.set(df)
                     return df
 
                 last_err = Exception("baostock returned no stock list for last 5 trading days")
@@ -937,12 +953,13 @@ class StockDataFetcher:
                 logger.info("[get_stock_list] baostock attempt %d failed: %s", _retry + 1, e)
                 time.sleep(1)
 
-        if self._stock_list_cache._data is not None:
+        stale = self._stock_list_cache.peek()
+        if stale is not None:
             logger.info(
                 "[get_stock_list] baostock failed repeatedly, using stale cache (%d rows)",
-                len(self._stock_list_cache._data),
+                len(stale),
             )
-            return self._stock_list_cache._data
+            return stale
         raise Exception(
             "baostock failed after multiple attempts; check network (last error: {})".format(last_err)
         )
@@ -957,11 +974,9 @@ class StockDataFetcher:
         cache_key = "{}_{}".format(code, days)
 
         # Check dict cache
-        cached = self._kline_cache._data.get(cache_key)
-        cached_ts = self._kline_cache._timestamps.get(cache_key)
-        if cached is not None and cached_ts is not None:
-            if (datetime.now() - cached_ts).total_seconds() < CACHE_TTL_SECONDS:
-                return cached
+        cached = self._kline_cache.peek(cache_key)   # 内置 TTL 判定，过期视为未命中
+        if cached is not None:
+            return cached
 
         sync_mode = os.environ.get("STOCKCHART_SYNC_MODE", "") == "1"
 
@@ -970,9 +985,7 @@ class StockDataFetcher:
             df = _get_kline_from_db(code, days)
             if not df.empty:
                 if sync_mode or _is_data_fresh(code):
-                    with self._kline_cache._lock:
-                        self._kline_cache._data[cache_key] = df
-                        self._kline_cache._timestamps[cache_key] = datetime.now()
+                    self._kline_cache.set(cache_key, df)
                     return df
         except Exception as e:
             logger.warning("SQLite read for %s K-line failed: %s", code, e)
@@ -988,9 +1001,7 @@ class StockDataFetcher:
                     _save_kline_to_db(code, df)
                 except Exception as e:
                     logger.warning("Saving %s K-line to SQLite failed: %s", code, e)
-                with self._kline_cache._lock:
-                    self._kline_cache._data[cache_key] = df
-                    self._kline_cache._timestamps[cache_key] = datetime.now()
+                self._kline_cache.set(cache_key, df)
                 return df
         except Exception as e:
             logger.warning("baostock fetch for %s failed: %s", code, e)

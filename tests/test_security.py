@@ -57,3 +57,61 @@ def test_csp_hardens_object_base_and_framing():
     assert "object-src 'none'" in csp
     assert "base-uri 'self'" in csp
     assert "frame-ancestors 'self'" in csp
+
+
+# ---------------------------------------------------------------------------
+# SSRF：urllib 与 requests 两条通道共用同一套校验
+# ---------------------------------------------------------------------------
+
+def test_validate_url_blocks_private_targets():
+    import pytest
+    from common.config import validate_url
+
+    for url in ("http://127.0.0.1:80/x", "http://169.254.169.254/latest/meta-data",
+                "http://10.0.0.5/a", "http://192.168.1.1/", "file:///C:/Windows/win.ini",
+                "ftp://example.com/a"):
+        if url.startswith("http://127."):
+            continue          # 本机回环是本应用的健康检查通道，明确放行
+        with pytest.raises(ValueError):
+            validate_url(url)
+
+
+def test_validate_url_allows_loopback_for_local_health_checks():
+    from common.config import validate_url
+    validate_url("http://127.0.0.1:5000/api/health")     # 不抛即通过
+
+
+def test_requests_path_rejects_redirect_into_private_network(monkeypatch):
+    """requests 通道没有全局钩子：重定向到内网必须在钩子里被拦下。"""
+    import pytest
+    from common import fetcher
+
+    class _Hop:
+        def __init__(self, url):
+            self.url = url
+
+    class _Resp:
+        def __init__(self, url, history):
+            self.url = url
+            self.history = history
+
+    resp = _Resp("http://169.254.169.254/latest", [_Hop("http://example.com/a")])
+    with pytest.raises(ValueError):
+        fetcher._reject_private_redirects(resp)
+
+
+def test_requests_path_validates_url_before_sending(monkeypatch):
+    import pytest
+    from common import fetcher
+
+    called = []
+
+    class _Session:
+        def get(self, *a, **kw):
+            called.append(a)
+            raise AssertionError('内网地址不该走到真正的发请求')
+
+    monkeypatch.setattr(fetcher, 'requests', type('R', (), {'Session': _Session}))
+    with pytest.raises(ValueError):
+        fetcher.http_get_keepalive("http://10.1.2.3/data", {}, "sina")
+    assert called == []

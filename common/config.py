@@ -193,6 +193,15 @@ def _validate_url(url: object) -> None:
                 raise ValueError(f"禁止访问内网地址: {ip}")
 
 
+def validate_url(url: object) -> None:
+    """Public SSRF guard for non-urllib channels.
+
+    urllib 走 ``install_urllib_patch()`` 的猴子补丁，``requests`` 那条路（keep-alive
+    行情抓取）没有全局钩子，必须在发请求前显式调用本函数，否则两套通道的防护不一致。
+    """
+    _validate_url(url)
+
+
 def _patched_urlopen(url, data=None, timeout=15, context=None, **kwargs):
     """Drop-in replacement for ``urllib.request.urlopen`` with safety checks.
 

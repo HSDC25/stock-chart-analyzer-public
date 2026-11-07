@@ -27,7 +27,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / 'update_dist' / 'update.json'
-DEFAULT_KEY = Path.home() / '.ssh' / 'id_ed25519_ubuntu'
+DEFAULT_KEY = Path(os.environ.get('STOCKCHART_PUBLISH_KEY')
+                   or (Path.home() / '.ssh' / 'id_ed25519_ubuntu'))
+# CI 里没有交互终端：默认 BatchMode（不弹口令）+ accept-new（首连自动记 known_hosts）
+SSH_OPTS = (os.environ.get('STOCKCHART_SSH_OPTS')
+            or '-o BatchMode=yes -o StrictHostKeyChecking=accept-new')
 # 2026-10-19 整站迁移：data.hsdc.cloud 已切到 81（新机），旧机 129 停止服务
 DEFAULT_HOST = os.environ.get('STOCKCHART_PUBLISH_HOST', 'ubuntu@81.71.134.71')
 DEFAULT_REMOTE_DIR = '/var/www/stockdata/updates'
@@ -50,7 +54,8 @@ def parse_args(argv=None):
     p.add_argument('--host', default=DEFAULT_HOST,
                    help='SSH 目标，如 user@host（也可用环境变量 STOCKCHART_PUBLISH_HOST）')
     p.add_argument('--remote-dir', default=DEFAULT_REMOTE_DIR)
-    p.add_argument('--key', default=str(DEFAULT_KEY))
+    p.add_argument('--key', default=str(DEFAULT_KEY),
+                   help='SSH 私钥路径（也可用环境变量 STOCKCHART_PUBLISH_KEY）')
     p.add_argument('--exe-version', default='',
                    help='改写清单里每个变体的 version。装机基数里若还有换体脚本坏掉的包，'
                         '必须把它压在装机版本上，否则那些机器每次启动都白下一个完整包')
@@ -70,14 +75,16 @@ def resolve(name: str) -> Path:
 
 
 def scp(key: Path, files: list, target: str) -> int:
-    cmd = ['scp', '-q', '-i', str(key)] + [str(f) for f in files] + [target]
+    cmd = (['scp', '-q', '-i', str(key)] + SSH_OPTS.split()
+           + [str(f) for f in files] + [target])
     return subprocess.run(cmd, check=False).returncode  # nosec B603 - 参数均为本地路径与固定目标
 
 
 def server_shas(key: Path, host: str, remote_dir: str, names: list) -> dict:
     quoted = ' '.join(names)
     out = subprocess.check_output(  # nosec B603 - names 来自清单文件名，已在本机解析过
-        ['ssh', '-i', str(key), host, f'cd {remote_dir} && sha256sum {quoted}'],
+        ['ssh', '-i', str(key)] + SSH_OPTS.split()
+        + [host, f'cd {remote_dir} && sha256sum {quoted}'],
         text=True, errors='ignore')
     sums = {}
     for line in out.splitlines():
@@ -96,6 +103,14 @@ def https_ok(entry_url: str, expect_size: int) -> bool:
             return r.status == 200 and length is not None and int(length) == expect_size
     except (urllib.error.URLError, ValueError):
         return False
+
+
+def verify_ui_signature(path: Path, signature: str) -> None:
+    """用客户端同一套逻辑校验界面包签名，签歪了绝不能发布。"""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from common import updater
+    updater.verify_detached_signature(path, signature)
 
 
 def main(argv=None) -> int:
@@ -136,6 +151,18 @@ def main(argv=None) -> int:
                       f'本地 {local_sha[:16]}… 清单 {expected[name][:16]}…')
                 print('       重新生成清单（publish_update.py）后再发布，别只改一半')
                 return 1
+            if kind == 'ui':
+                # 新版客户端强制验签：清单缺签名或签名对不上，发布出去等于让界面热更全体失效
+                signature = entry.get('ui_sig') or ''
+                if not signature:
+                    print(f'[FAIL] {variant} 的界面包没有签名（ui_sig）；'
+                          '新版客户端会拒绝界面热更。请用带签名证书的机器重跑 publish_update.py')
+                    return 1
+                try:
+                    verify_ui_signature(path, signature)
+                except Exception as exc:
+                    print(f'[FAIL] {variant} 的界面包签名校验不通过：{exc}')
+                    return 1
             payload[name] = path
     print(f'[ok] 本地产物 {len(payload)} 个，sha 全部与清单一致')
 

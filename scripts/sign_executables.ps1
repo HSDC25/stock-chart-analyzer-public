@@ -38,6 +38,22 @@ if (-not $signtool) {
     throw '未找到 signtool.exe，请安装 Windows 10/11 SDK（Visual Studio 里勾选 Windows SDK）'
 }
 $signtool = $signtool.FullName
+
+# 按主题在用户证书库找带私钥的代码签名证书。
+# 不用 -CodeSigningCert：那是 Windows PowerShell 5.1 证书驱动器的动态参数，
+# 在 pwsh 7 下不存在（且父进程是 pwsh 时 5.1 会继承 PS7 的模块路径，同样失效），
+# 表现是"找不到证书"→签名整段跳过。这里改成显式过滤 EKU + 私钥，两边都可用。
+function Find-CodeSigningCert {
+    param([string]$Subject)
+    $codeSigningOid = '1.3.6.1.5.5.7.3.3'
+    Get-ChildItem Cert:\CurrentUser\My |
+        Where-Object {
+            $_.Subject -eq $Subject -and
+            $_.HasPrivateKey -and
+            ($_.EnhancedKeyUsageList.ObjectId -contains $codeSigningOid)
+        } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+}
 Write-Host "[signtool] $signtool"
 
 # 2. 收集待签产物
@@ -57,15 +73,17 @@ if ($VerifyOnly) {
     $signArgs = @()
 } elseif ($PfxPath) {
     $signArgs = @('sign', '/f', $PfxPath, '/fd', 'SHA256', '/td', 'SHA256', '/tr', $Timestamp, '/d', $Description)
+    # 非交互场景（CI / 计划任务）没法传 securestring，允许用环境变量给口令
+    $plainPfxPassword = $env:STOCKCHART_SIGN_PFX_PASSWORD
     if ($PfxPassword) {
-        $plain = [Runtime.InteropServices.Marshal]::PtrToStringUni(
+        $plainPfxPassword = [Runtime.InteropServices.Marshal]::PtrToStringUni(
             [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($PfxPassword))
-        $signArgs = @('sign', '/f', $PfxPath, '/p', $plain, '/fd', 'SHA256', '/td', 'SHA256', '/tr', $Timestamp, '/d', $Description)
+    }
+    if ($plainPfxPassword) {
+        $signArgs = @('sign', '/f', $PfxPath, '/p', $plainPfxPassword, '/fd', 'SHA256', '/td', 'SHA256', '/tr', $Timestamp, '/d', $Description)
     }
 } else {
-    $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
-            Where-Object { $_.Subject -eq $Subject } |
-            Sort-Object NotAfter -Descending | Select-Object -First 1
+    $cert = Find-CodeSigningCert -Subject $Subject
     if (-not $cert) { throw "找不到证书 $Subject，请先执行 new_signing_cert.ps1（或改用 -PfxPath）" }
     if (($cert.NotAfter - (Get-Date)).Days -lt 30) {
         Write-Warning "证书将在 $($cert.NotAfter) 过期（不足 30 天），建议先跑 new_signing_cert.ps1 续期"
@@ -112,9 +130,7 @@ if (Test-Path $updaterPy) {
     $whitelist = @([regex]::Matches((Get-Content $updaterPy -Raw), "'([0-9a-fA-F]{64})'") |
                    ForEach-Object { $_.Groups[1].Value.ToLower() })
 }
-$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
-        Where-Object { $_.Subject -eq $Subject } |
-        Sort-Object NotAfter -Descending | Select-Object -First 1
+$cert = Find-CodeSigningCert -Subject $Subject
 if ($cert) {
     $certSha256 = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData) |
                    ForEach-Object { $_.ToString('x2') }) -join ''

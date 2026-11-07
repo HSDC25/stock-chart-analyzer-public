@@ -6,6 +6,7 @@ pd = pytest.importorskip("pandas")
 from common.db import init_db, save_kline_to_db
 from common.screening import (
     compute_n_day_change,
+    compute_n_day_change_batch,
     compute_three_day_change,
     compute_volume_change_pct,
     is_limit_up,
@@ -83,3 +84,42 @@ def test_batch_compute_metrics_missing_codes(tmp_path, monkeypatch):
     assert "999999" in result
     assert result["999999"]["three_day_change"] is None
     assert result["999999"]["volume_change_pct"] is None
+
+
+def test_n_day_change_batch_matches_single(tmp_path, monkeypatch):
+    # 批量版必须与逐股版逐项一致（M7：全市场排行改批量后语义不能漂移）
+    db = _seed_db(tmp_path)
+    import common.config as config
+    import common.db as db_module
+    monkeypatch.setattr(config, "DB_PATH", db)
+    # get_read_conn 缓存了线程内连接，必须丢掉旧的才能指向临时库
+    if hasattr(db_module._db_read_local, "conn"):
+        db_module._db_read_local.conn.close()
+        del db_module._db_read_local.conn
+
+    dates = pd.date_range("2024-06-01", periods=10, freq="B")
+    for code, step in (("600001", 0.3), ("600002", -0.2), ("300001", 0.8)):
+        save_kline_to_db(code, pd.DataFrame({
+            "date": dates.strftime("%Y-%m-%d"),
+            "open": [20.0] * 10,
+            "close": [20 + i * step for i in range(10)],
+            "high": [21.0] * 10,
+            "low": [19.0] * 10,
+            "volume": [500] * 10,
+            "amount": [5000.0] * 10,
+            "pct_change": [1.0] * 10,
+        }), db_path=db)
+
+    codes = ["600000", "600001", "600002", "300001", "999999"]
+    batch = compute_n_day_change_batch(codes, 3, end_str="2024-06-14")
+    assert batch, "临时库里应能算出售价涨幅，空字典说明没读到数据"
+    for code in codes:
+        single = compute_n_day_change(code, 3, end_str="2024-06-14")
+        if single is None:
+            assert code not in batch
+        else:
+            assert batch[code] == single, code
+
+
+def test_n_day_change_batch_empty():
+    assert compute_n_day_change_batch([], 3, end_str="2024-06-14") == {}

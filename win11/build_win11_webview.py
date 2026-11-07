@@ -59,6 +59,8 @@ HIDDEN_IMPORTS = [
     'common.screening',
     'common.security',
     'common.trading_calendar',
+    # 应用组装（安全钩子/蓝图/建库）——app.py 依赖它，漏收会在启动时 ModuleNotFoundError
+    'common.app_factory',
     'common.routes',
     'common.routes.api_routes',
     'common.routes.screen_routes',

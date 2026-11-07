@@ -32,47 +32,13 @@ logger = configure_logging()
 install_urllib_patch()
 
 # ---------------------------------------------------------------------------
-# 2. Flask application
+# 2~5. Flask 应用、安全钩子、蓝图注册、建库
+#
+#    统一由 common.app_factory.create_app 完成（与 win7 版共用同一份），
+#     顺序是：安全钩子 → 保存对话框回调 → 建库 → 注册蓝图。
+#     本文件末尾才调用，因为保存对话框要先定义好。
 # ---------------------------------------------------------------------------
-from flask import Flask  # noqa: E402
-
-app = Flask(__name__)
-# 未设置环境变量时每次启动随机生成 secret_key：本地单用户场景可接受，
-# 重启后旧会话失效，但避免把固定密钥硬编码进发布包
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
-# 限制请求体大小，防止异常大包拖垮本地服务
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
-
-# ---------------------------------------------------------------------------
-# 3. Security hooks (headers, CORS, CSRF, MAX_CONTENT_LENGTH)
-# ---------------------------------------------------------------------------
-from common.security import register_security  # noqa: E402
-
-register_security(app)
-
-# ---------------------------------------------------------------------------
-# 4. Register blueprints
-# ---------------------------------------------------------------------------
-from common.routes.api_routes import api_bp  # noqa: E402
-from common.routes.screen_routes import screen_bp  # noqa: E402
-from common.routes.ml_routes import ml_bp  # noqa: E402
-from common.routes.chart_routes import chart_bp  # noqa: E402
-from common.routes.assets_routes import assets_bp  # noqa: E402
-from common.routes.update_routes import update_bp  # noqa: E402
-
-app.register_blueprint(api_bp)
-app.register_blueprint(screen_bp)
-app.register_blueprint(ml_bp)
-app.register_blueprint(chart_bp)
-app.register_blueprint(assets_bp)
-app.register_blueprint(update_bp)
-
-# ---------------------------------------------------------------------------
-# 5. Database initialisation
-# ---------------------------------------------------------------------------
-from common.db import init_db  # noqa: E402
-
-init_db()
+from common.app_factory import create_app, lazy_export  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 6. Fetcher singleton
@@ -121,9 +87,9 @@ _preload_progress = preload_state._progress        # same dict object
 #
 #    chart_routes reads ``current_app.config['SAVE_DIALOG_FN']``.
 #    Launchers that use pywebview should override this after import.
-#    We set a default of None so the app works without pywebview.
+#    Default is None so the app works without pywebview.
 # ---------------------------------------------------------------------------
-app.config["SAVE_DIALOG_FN"] = None
+_save_dialog_fn = None
 
 try:
     import webview  # type: ignore[import-untyped]
@@ -142,7 +108,7 @@ try:
             logger.debug("save dialog failed: %s", exc)
         return None
 
-    app.config["SAVE_DIALOG_FN"] = _default_save_dialog
+    _save_dialog_fn = _default_save_dialog
 except ImportError:
     pass  # pywebview not available (testing / headless)
 
@@ -180,43 +146,17 @@ from common.trading_calendar import (  # noqa: E402, F401
 # fetcher / indicators / screening 三个模块携带 pandas、numpy、baostock，
 # 约占启动黑箱期 2~5 秒。路由都是请求时才 ``from app import <名字>``，
 # 这里只挂模块级 __getattr__，首次访问才真正导入；
-# 启动器会在 Flask 就绪后用后台线程预热（launcher_base.warmup_heavy_modules）。
+# 导出表见 common/app_factory.py 的 LAZY_HEAVY_EXPORTS。
 # ---------------------------------------------------------------------------
-import importlib as _importlib
-
-_LAZY_HEAVY_EXPORTS = {
-    # common.fetcher
-    'fetcher': 'common.fetcher',
-    'StockDataFetcher': 'common.fetcher',
-    'fetch_kline': 'common.fetcher',
-    'fetch_realtime_tencent_to_db': 'common.fetcher',
-    'random_browser_headers': 'common.fetcher',
-    # common.indicators
-    'prepare_chart_data': 'common.indicators',
-    'calculate_ma': 'common.indicators',
-    'calculate_macd': 'common.indicators',
-    'calculate_rsi': 'common.indicators',
-    'calculate_bollinger': 'common.indicators',
-    'clean_nan_values': 'common.indicators',
-    # common.screening
-    'filter_stocks': 'common.screening',
-    'compute_three_day_change': 'common.screening',
-    'compute_volume_change_pct': 'common.screening',
-    'compute_n_day_change': 'common.screening',
-    'is_limit_up': 'common.screening',
-    'compute_limit_up_pullback': 'common.screening',
-    'compute_big_up_days_count': 'common.screening',
-    'batch_compute_metrics': 'common.screening',
-    'fetch_recent_trading_bars': 'common.screening',
-}
-
 
 def __getattr__(name):
     """PEP 562：路由 ``from app import <重模块名字>`` 时按需导入。"""
-    mod_name = _LAZY_HEAVY_EXPORTS.get(name)
-    if mod_name is None:
-        raise AttributeError(f"module 'app' has no attribute {name!r}")
-    return getattr(_importlib.import_module(mod_name), name)
+    return lazy_export(name)
 
+
+# ---------------------------------------------------------------------------
+# 12. Flask application（安全钩子 → 保存对话框 → 建库 → 蓝图，全在 factory 内）
+# ---------------------------------------------------------------------------
+app = create_app(__name__, save_dialog_fn=_save_dialog_fn)
 
 logger.info("app.py thin wrapper initialised successfully")

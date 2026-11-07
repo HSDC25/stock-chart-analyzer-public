@@ -15,10 +15,13 @@ Two update granularities, both served from ``data.hsdc.cloud``:
 
 Security posture: the manifest and every payload are fetched over HTTPS only
 (the plain-HTTP IP fallback used for the database is deliberately not trusted for
-code), and a ``sha256`` in the manifest is mandatory for both payloads.
+code), a ``sha256`` in the manifest is mandatory for both payloads, and both carry
+an official-signature proof — Authenticode on the EXE, a detached PKCS#7 over the
+zip in ``ui_sig`` for the UI overlay — verified against the same pinned certificate.
 """
 from __future__ import annotations
 
+import base64
 import ctypes
 import hashlib
 import json
@@ -200,7 +203,11 @@ def variant_entry(manifest, variant=None):
     variants = manifest.get('variants') or {}
     wanted = (variant or VARIANT).strip().lower()
     for key, value in variants.items():
-        if key.strip().lower().rstrip('.exe') == wanted and isinstance(value, dict):
+        normalized = key.strip().lower()
+        # rstrip('.exe') 是按字符集剥尾，会把 win11.exe 误剥成 win1；只剥完整后缀
+        if normalized.endswith('.exe'):
+            normalized = normalized[:-4]
+        if normalized == wanted and isinstance(value, dict):
             return value
     return None
 
@@ -239,14 +246,14 @@ TRUSTED_CERT_SHA256 = (
 # 「签名本身完整、只是信任判定不过」的错误码：这类才允许用指纹白名单兜底放行。
 # TRUST_E_NOSIGNATURE(0x800B0100)、TRUST_E_BAD_DIGEST(0x80096010)、TRUST_E_FAIL(0x800B010B)
 # 等一律不在列 —— 白名单绝不能变成「绕过篡改检测」的后门。
+# CERT_E_REVOKED(0x800B010C) 与 TRUST_E_EXPLICIT_DISTRUST(0x800B0111) 也不在列：
+# 吊销/显式不信任是主动的安全否决，自签兜底不能凌驾其上（密钥泄露后唯一的止血手段）。
 _PIN_FALLBACK_CODES = frozenset((
     0x800B0101,  # CERT_E_EXPIRED             证书过期（根治是重新签名，兜底只为不断链）
     0x800B0102,  # CERT_E_VALIDITYPERIODNESTING
     0x800B0109,  # CERT_E_UNTRUSTEDROOT       根不受信：自签证书的常态
     0x800B010A,  # CERT_E_CHAINING
-    0x800B010C,  # CERT_E_REVOKED
     0x800B0110,  # CERT_E_WRONG_USAGE
-    0x800B0111,  # TRUST_E_EXPLICIT_DISTRUST
     0x800B0112,  # CERT_E_REVOCATION_FAILURE
 ))
 
@@ -393,6 +400,136 @@ def verify_exe_signature(path):
     )
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Detached CMS signature (UI-only packages)
+# ────────────────────────────────────────────────────────────────────────────
+
+# zip 不是 PE 文件，Authenticode 签不了；界面包改用同一张代码签名证书做
+# PKCS#7 detached 签名（清单里的 ui_sig，base64）。验签同样以证书指纹白名单
+# 为准，和 EXE 那条链共用 TRUSTED_CERT_SHA256，发布方不需要第二套身份。
+_X509_ASN_ENCODING = 0x00000001
+_PKCS_7_ASN_ENCODING = 0x00010000
+
+
+class _CRYPT_VERIFY_MESSAGE_PARA(ctypes.Structure):
+    """CRYPT_VERIFY_MESSAGE_PARA：Win7 版只有前 5 个字段，cbSize 自描述。"""
+
+    _fields_ = [
+        ('cbSize', ctypes.c_ulong),
+        ('dwMsgAndCertEncodingType', ctypes.c_ulong),
+        ('hCryptProv', ctypes.c_void_p),
+        ('pfnGetSignerCertificate', ctypes.c_void_p),
+        ('pvGetArg', ctypes.c_void_p),
+    ]
+
+
+def verify_detached_signature(path, signature, trusted=None):
+    # type: (Path, str, frozenset | None) -> None
+    """Verify a detached PKCS#7 signature over *path* and pin the signer cert.
+
+    *signature* 是 base64 的 PKCS#7（清单里的 ``ui_sig``）。校验两件事：
+
+    1. 摘要与签名本身有效（内容被改一个字节就失败）；
+    2. 签名者证书 DER SHA-256 命中 ``TRUSTED_CERT_SHA256``（同一份白名单）。
+
+    只做第 1 步是不够的：任何自签证书都能签出一份"有效"的包。非 Windows 平台
+    没有 crypt32，直接放行（与 EXE 签名的处理一致）。
+    """
+    path = Path(path)
+    if os.name != 'nt':
+        return
+    allowed = _trusted_cert_sha256() if trusted is None else frozenset(trusted)
+    if not allowed:
+        raise UpdateError('未配置可信证书指纹，无法校验界面更新包签名，已拒绝安装')
+    raw_sig = _decode_signature(signature)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise UpdateError('读取界面更新包失败: {}'.format(exc))
+
+    try:
+        cert_der = _cms_verify(data, raw_sig)
+    except OSError as exc:
+        raise UpdateError('系统缺少 crypt32.dll，无法校验界面包签名: {}'.format(exc))
+    if cert_der is None:
+        raise UpdateError('界面更新包签名无效（摘要不符或签名结构损坏），已拒绝安装')
+
+    actual = hashlib.sha256(cert_der).hexdigest()
+    if actual not in allowed:
+        raise UpdateError(
+            '界面更新包签名者证书指纹不在白名单（{}…）：不是官方发布的包，已拒绝安装'
+            .format(actual[:16])
+        )
+
+
+def _decode_signature(signature):
+    # type: (str | bytes) -> bytes
+    if isinstance(signature, bytes):
+        return signature
+    text = str(signature or '').strip()
+    # 列清单里可能带 PEM 头尾或换行，一并容错
+    text = re.sub(r'-----(BEGIN|END)[^-]*-----', '', text)
+    text = ''.join(text.split())
+    if not text:
+        raise UpdateError('界面更新包缺少签名，已拒绝安装')
+    try:
+        return base64.b64decode(text, validate=True)
+    except Exception:
+        raise UpdateError('界面更新包签名格式错误（不是合法 base64），已拒绝安装')
+
+
+def _cms_verify(data, raw_sig):
+    # type: (bytes, bytes) -> bytes | None
+    """跑一次 ``CryptVerifyDetachedMessageSignature``，返回签名者证书 DER。
+
+    签名有效返回证书 DER；签名/摘要不匹配或结构损坏返回 ``None``。
+    """
+    from ctypes import wintypes
+
+    crypt32 = ctypes.WinDLL('crypt32.dll', use_last_error=True)
+    crypt32.CryptVerifyDetachedMessageSignature.restype = wintypes.BOOL
+    crypt32.CryptVerifyDetachedMessageSignature.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    crypt32.CertFreeCertificateContext.restype = wintypes.BOOL
+    crypt32.CertFreeCertificateContext.argtypes = [ctypes.c_void_p]
+
+    para = _CRYPT_VERIFY_MESSAGE_PARA()
+    para.cbSize = ctypes.sizeof(_CRYPT_VERIFY_MESSAGE_PARA)
+    para.dwMsgAndCertEncodingType = _X509_ASN_ENCODING | _PKCS_7_ASN_ENCODING
+    para.hCryptProv = None
+    para.pfnGetSignerCertificate = None
+    para.pvGetArg = None
+
+    data_buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+    sig_buf = (ctypes.c_ubyte * len(raw_sig)).from_buffer_copy(raw_sig)
+    # rgpbToBeSigned 是「指向缓冲区的指针数组」，这里只有一个待验内容
+    to_sign = (ctypes.c_void_p * 1)(ctypes.cast(data_buf, ctypes.c_void_p))
+    to_sign_len = (wintypes.DWORD * 1)(len(data))
+    signer = ctypes.c_void_p()
+
+    ok = crypt32.CryptVerifyDetachedMessageSignature(
+        ctypes.byref(para), 0,
+        ctypes.cast(sig_buf, ctypes.c_void_p), len(raw_sig),
+        1, ctypes.byref(to_sign), ctypes.byref(to_sign_len),
+        ctypes.byref(signer),
+    )
+    if not ok:
+        if signer.value:
+            crypt32.CertFreeCertificateContext(signer)
+        return None
+    if not signer.value:
+        return None
+    try:
+        cert = ctypes.cast(signer, ctypes.POINTER(_CERT_CONTEXT)).contents
+        if not cert.pbCertEncoded or not cert.cbCertEncoded:
+            return None
+        return ctypes.string_at(cert.pbCertEncoded, cert.cbCertEncoded)
+    finally:
+        crypt32.CertFreeCertificateContext(signer)
+
+
 def _wintrust_verify(path, data_cls):
     # type: (Path, type) -> tuple
     """用 *data_cls* 指定的 WINTRUST_DATA 版式跑一次 WinVerifyTrust。
@@ -514,12 +651,16 @@ def _sha256_of(path, cancel=None):
     return h.hexdigest()
 
 
-def download(url, dest, sha256, label, cancel=None, timeout=600, verify_signature=False):
-    # type: (str, Path, str, str, threading.Event | None, int, bool) -> None
-    """Stream *url* to *dest*; require sha256, and for EXEs a trusted signature.
+def download(url, dest, sha256, label, cancel=None, timeout=600, verify_signature=False,
+             signature=None):
+    # type: (str, Path, str, str, threading.Event | None, int, bool, str | None) -> None
+    """Stream *url* to *dest*; require sha256, and a proof of origin.
 
     ``verify_signature`` 由程序本体的下载置 True —— sha256 只能证明"与清单一致"，
     而清单与摘要同源、无法自证；Authenticode 签名才证明"确实出自官方"。
+
+    ``signature`` 给界面包（zip 无法做 Authenticode）：清单里的 detached PKCS#7
+    （base64），校验摘要并钉住签名者证书指纹。
     """
     if not sha256:
         raise UpdateError('{} 缺少 sha256，拒绝安装'.format(label))
@@ -553,6 +694,8 @@ def download(url, dest, sha256, label, cancel=None, timeout=600, verify_signatur
         if verify_signature:
             # 摘要与清单同源，只有签名能证明这份 EXE 出自官方；不通过则绝不落盘换体
             verify_exe_signature(partial)
+        if signature is not None:
+            verify_detached_signature(partial, signature)
         if dest.exists():
             dest.unlink()
         shutil.move(str(partial), str(dest))
@@ -930,9 +1073,14 @@ def run_update(auto_apply=True, restart=True, cancel=None):
         # UI-only: a few hundred KB, no EXE write access needed
         if not entry.get('ui_url'):
             raise UpdateError('更新清单缺少 ui_url')
+        # 界面包同样必须有官方签名：zip 拿不到 Authenticode，用证书对包体做
+        # detached PKCS#7，缺签名就整包拒收（宁可这次不热更，也不执行来源不明的页面）
+        ui_sig = entry.get('ui_sig')
+        if not ui_sig:
+            raise UpdateError('更新清单缺少界面包签名（ui_sig），已拒绝安装界面更新')
         ui_zip = workdir / 'ui.zip'
         download(str(entry['ui_url']), ui_zip, str(entry.get('ui_sha256') or ''),
-                 '界面更新包', cancel)
+                 '界面更新包', cancel, signature=ui_sig)
         result = apply_ui_overlay(ui_zip)
         # 覆盖层已解压到目标目录，包体随即作废。重启走 os._exit 跳过 finally，
         # 不在这里删就会每次热更都在 Documents 里留几百 KB。

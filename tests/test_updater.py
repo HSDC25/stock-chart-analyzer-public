@@ -73,6 +73,23 @@ def test_variant_entry_matches_case_and_suffix():
     assert updater.variant_entry(manifest, 'StockChart_Win11_Dark') is None
 
 
+def test_variant_entry_strips_only_full_exe_suffix():
+    # rstrip('.exe') 按字符集剥尾会把 win11.exe 误剥成 win1；只允许剥完整 .exe
+    manifest = {'variants': {'win11.exe': {'version': '1'}, 'win7.exe': {'version': '2'}}}
+    assert updater.variant_entry(manifest, 'win11')['version'] == '1'
+    assert updater.variant_entry(manifest, 'win7')['version'] == '2'
+    assert updater.variant_entry(manifest, 'win1') is None
+
+
+def test_pin_fallback_excludes_revocation_and_explicit_distrust():
+    # 吊销/显式不信任是主动安全否决，自签指纹兜底不得凌驾其上
+    assert 0x800B010C not in updater._PIN_FALLBACK_CODES  # CERT_E_REVOKED
+    assert 0x800B0111 not in updater._PIN_FALLBACK_CODES  # TRUST_E_EXPLICIT_DISTRUST
+    assert 0x80096010 not in updater._PIN_FALLBACK_CODES  # TRUST_E_BAD_DIGEST
+    assert 0x800B0100 not in updater._PIN_FALLBACK_CODES  # TRUST_E_NOSIGNATURE
+    assert 0x800B0109 in updater._PIN_FALLBACK_CODES      # CERT_E_UNTRUSTEDROOT（自签常态）
+
+
 # ---------------------------------------------------------------------------
 # fixture: local update server
 # ---------------------------------------------------------------------------
@@ -96,6 +113,19 @@ def update_server(tmp_path, monkeypatch):
     yield tmp_path, port
     srv.shutdown()
     srv.server_close()
+
+
+@pytest.fixture()
+def accept_ui_signature(monkeypatch):
+    """UI-only 流程测试不依赖真证书：记录并放行传给验签的签名串。"""
+    seen = []
+
+    def _verify(path, signature, trusted=None):
+        seen.append((str(path), signature))
+        assert signature == 'test-sig'
+
+    monkeypatch.setattr(updater, 'verify_detached_signature', _verify)
+    return seen
 
 
 def write_overlay(base_dir, version, templates='bundled', static='body{}'):
@@ -339,6 +369,99 @@ def test_trusted_cert_sha256_merges_and_normalizes(monkeypatch):
     assert '' not in got            # 空项丢弃
 
 
+# ---------------------------------------------------------------------------
+# UI 包 detached 签名（S1）：zip 做不了 Authenticode，改用证书签包体
+# ---------------------------------------------------------------------------
+
+def test_decode_signature_rejects_empty_and_garbage():
+    with pytest.raises(updater.UpdateError, match='缺少签名'):
+        updater._decode_signature('')
+    with pytest.raises(updater.UpdateError, match='base64'):
+        updater._decode_signature('not base64 !!!')
+
+
+def test_decode_signature_strips_pem_wrapping():
+    import base64
+    raw = b'hello-p7'
+    pem = '-----BEGIN PKCS7-----\n{}\n-----END PKCS7-----'.format(
+        base64.b64encode(raw).decode('ascii'))
+    assert updater._decode_signature(pem) == raw
+
+
+def _sign_with_local_cert(path):
+    """用本机证书存储里的代码签名证书签一份 detached PKCS#7；没有证书则跳过。"""
+    if os.name != 'nt':
+        pytest.skip('仅 Windows 有证书存储')
+    sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+    try:
+        import update_lib
+    finally:
+        sys.path.remove(os.path.join(ROOT, 'scripts'))
+    try:
+        return update_lib.sign_ui_payload(path)
+    except Exception as exc:      # 没装签名证书的机器上跳过，不误报失败
+        pytest.skip('本机没有可用的代码签名证书: {}'.format(exc))
+
+
+def test_detached_signature_accepts_pinned_signer(monkeypatch, tmp_path):
+    zip_path = tmp_path / 'ui.zip'
+    zip_path.write_bytes(b'ui-payload-v1')
+    sig = _sign_with_local_cert(zip_path)
+    fingerprints = updater._trusted_cert_sha256()
+    if not fingerprints:
+        pytest.skip('未配置 TRUSTED_CERT_SHA256')
+    updater.verify_detached_signature(zip_path, sig)     # 不抛异常即通过
+
+
+def test_detached_signature_rejects_tampered_payload(tmp_path):
+    zip_path = tmp_path / 'ui.zip'
+    zip_path.write_bytes(b'ui-payload-v1')
+    sig = _sign_with_local_cert(zip_path)
+    zip_path.write_bytes(b'ui-payload-v2')               # 内容被换掉
+    with pytest.raises(updater.UpdateError, match='签名无效'):
+        updater.verify_detached_signature(zip_path, sig)
+
+
+def test_detached_signature_rejects_unpinned_signer(tmp_path):
+    zip_path = tmp_path / 'ui.zip'
+    zip_path.write_bytes(b'ui-payload-v1')
+    sig = _sign_with_local_cert(zip_path)
+    with pytest.raises(updater.UpdateError, match='白名单'):
+        updater.verify_detached_signature(zip_path, sig, trusted=frozenset({'a' * 64}))
+
+
+def test_detached_signature_requires_nonempty_whitelist(tmp_path):
+    zip_path = tmp_path / 'ui.zip'
+    zip_path.write_bytes(b'ui-payload-v1')
+    if os.name != 'nt':
+        pytest.skip('非 Windows 直接放行，无白名单逻辑')
+    with pytest.raises(updater.UpdateError, match='可信证书指纹'):
+        updater.verify_detached_signature(zip_path, 'AAAA', trusted=frozenset())
+
+
+def test_run_update_refuses_unsigned_ui_package(update_server, monkeypatch):
+    """清单没带 ui_sig -> 整包拒收：宁可这次不热更，也不执行来源不明的页面。"""
+    base, port = update_server
+    with zipfile.ZipFile(str(base / 'ui.zip'), 'w') as zf:
+        zf.writestr('build_info.json', json.dumps({'version': '2030.01.01', 'variant': 't'}))
+        zf.writestr('templates/index.html', 'UNSIGNED')
+    ui_sha = hashlib.sha256((base / 'ui.zip').read_bytes()).hexdigest()
+    (base / 'update.json').write_text(json.dumps({'variants': {
+        'StockChart_Win11_Dark': {
+            'version': '2020.01.01',
+            'ui_version': '2030.01.01',
+            'ui_url': 'http://127.0.0.1:{}/ui.zip'.format(port),
+            'ui_sha256': ui_sha,
+        }}}), encoding='utf-8')
+    monkeypatch.setattr(updater, 'APP_VERSION', '2020.01.01')
+    monkeypatch.setattr(updater, 'VARIANT', 'StockChart_Win11_Dark')
+
+    result = updater.run_update(auto_apply=True, restart=False)
+    assert result['updated'] is False and result['phase'] == 'failed'
+    assert '签名' in result['error']
+    assert not (updater.overlay_dir() / 'templates' / 'index.html').exists()
+
+
 def test_signer_cert_der_extracted_for_trusted_binary():
     """真实签名程序上证书 DER 必须取得到 —— 这是指纹兜底的前提条件。"""
     if os.name != 'nt':
@@ -484,7 +607,7 @@ def test_plan_update_detects_exe_and_ui(update_server, monkeypatch):
     assert plan['exe'] and plan['ui']
 
 
-def test_run_update_installs_ui_only(update_server, monkeypatch):
+def test_run_update_installs_ui_only(update_server, monkeypatch, accept_ui_signature):
     base, port = update_server
     with zipfile.ZipFile(str(base / 'ui.zip'), 'w') as zf:
         zf.writestr('build_info.json', json.dumps({'version': '2030.01.01', 'variant': 't'}))
@@ -497,6 +620,7 @@ def test_run_update_installs_ui_only(update_server, monkeypatch):
             'ui_version': '2030.01.01',
             'ui_url': 'http://127.0.0.1:{}/ui.zip'.format(port),
             'ui_sha256': ui_sha,
+            'ui_sig': 'test-sig',
             'notes': '界面小修'}}}), encoding='utf-8')
     monkeypatch.setattr(updater, 'APP_VERSION', '2020.01.01')
     monkeypatch.setattr(updater, 'VARIANT', 'StockChart_Win11_Dark')
@@ -504,6 +628,7 @@ def test_run_update_installs_ui_only(update_server, monkeypatch):
     result = updater.run_update(auto_apply=True, restart=False)
     assert result['updated'] and result['kind'] == 'ui'
     assert result['restart_required'] is True          # 没有登记活着的 app，只能靠重启
+    assert accept_ui_signature, '必须真的走一遍界面包验签'
     index = updater.overlay_dir() / 'templates' / 'index.html'
     assert index.read_text(encoding='utf-8') == 'HOT'
     st = updater.status()
@@ -511,7 +636,8 @@ def test_run_update_installs_ui_only(update_server, monkeypatch):
     assert not list((updater.DATA_DIR / 'updates').glob('stockchart_update_*'))
 
 
-def test_run_update_hot_repoints_live_app_without_restart(update_server, monkeypatch, tmp_path):
+def test_run_update_hot_repoints_live_app_without_restart(update_server, monkeypatch, tmp_path,
+                                                          accept_ui_signature):
     """win7 浏览器版的使用者是老人：界面热更必须原地生效，不能重启进程、不能换端口。"""
     base, port = update_server
     with zipfile.ZipFile(str(base / 'ui.zip'), 'w') as zf:
@@ -525,6 +651,7 @@ def test_run_update_hot_repoints_live_app_without_restart(update_server, monkeyp
             'ui_version': '2030.01.01',
             'ui_url': 'http://127.0.0.1:{}/ui.zip'.format(port),
             'ui_sha256': sha,
+            'ui_sig': 'test-sig',
         }}}), encoding='utf-8')
     monkeypatch.setattr(updater, 'APP_VERSION', '2020.01.01')
     monkeypatch.setattr(updater, 'VARIANT', 'StockChart_Win7_64_browser')
@@ -803,7 +930,8 @@ def fake_repo(tmp_path):
     return repo
 
 
-def test_publish_ui_zip_to_hot_overlay_end_to_end(update_server, fake_repo, monkeypatch):
+def test_publish_ui_zip_to_hot_overlay_end_to_end(update_server, fake_repo, monkeypatch,
+                                                  accept_ui_signature):
     sys.path.insert(0, os.path.join(ROOT, 'scripts'))
     try:
         import update_lib
@@ -822,6 +950,7 @@ def test_publish_ui_zip_to_hot_overlay_end_to_end(update_server, fake_repo, monk
             'ui_version': '2999.12.31',
             'ui_url': 'http://127.0.0.1:{}/ui.zip'.format(port),
             'ui_sha256': hashlib.sha256(zip_path.read_bytes()).hexdigest(),
+            'ui_sig': 'test-sig',
         }}}), encoding='utf-8')
     monkeypatch.setattr(updater, 'APP_VERSION', '2020.01.01')
     monkeypatch.setattr(updater, 'VARIANT', 'StockChart_Win11_Dark')
@@ -887,6 +1016,9 @@ def test_build_manifest_ui_version_lands_in_both_zip_and_list(tmp_path, fake_rep
     entry = res['manifest']['variants']['StockChart_Win11_Dark']
     assert entry['version'] == '2026.10.05'          # 本体版本不受界面包定版影响
     assert entry['ui_version'] == '2026.10.05.2'
+    # 清单必须带界面包签名，且能被客户端那套逻辑验过（没证书的机器跳过）
+    if os.name == 'nt' and entry.get('ui_sig'):
+        updater.verify_detached_signature(out / 'StockChart_Win11_Dark_ui.zip', entry['ui_sig'])
     with zipfile.ZipFile(str(out / 'StockChart_Win11_Dark_ui.zip')) as zf:
         assert json.loads(zf.read('build_info.json'))['version'] == '2026.10.05.2'
 
@@ -897,7 +1029,8 @@ def test_build_manifest_ui_version_lands_in_both_zip_and_list(tmp_path, fake_rep
         assert entry['ui_version'] == json.loads(zf.read('build_info.json'))['version'] == '2026.10.05'
 
 
-def test_same_day_ui_republish_needs_a_bumped_ui_version(update_server, monkeypatch, tmp_path):
+def test_same_day_ui_republish_needs_a_bumped_ui_version(update_server, monkeypatch, tmp_path,
+                                                         accept_ui_signature):
     """同日重发界面包：清单 ui_version 不抬位，客户端就永远拿不到新 zip。
 
     客户端拿清单的 ui_version 与本地 overlay_version 比大小；抬一位（2026.10.05.2）才
@@ -926,6 +1059,7 @@ def test_same_day_ui_republish_needs_a_bumped_ui_version(update_server, monkeypa
                 'ui_version': ui_version,
                 'ui_url': 'http://127.0.0.1:{}/{}'.format(port, name),
                 'ui_sha256': hashlib.sha256(raw).hexdigest(),
+                'ui_sig': 'test-sig',
             }}}), encoding='utf-8')
 
     # 同日同版：判定"已是最新"，那份新 zip 根本不会被下载

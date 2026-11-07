@@ -107,12 +107,16 @@ from common.trading_calendar import (  # noqa: F401
     trading_day_fetch_range,
 )
 
-from common.routes.api_routes import api_bp
-from common.routes.screen_routes import screen_bp
-from common.routes.ml_routes import ml_bp
-from common.routes.chart_routes import chart_bp
-from common.routes.assets_routes import assets_bp
-from common.routes.update_routes import update_bp
+from common.routes.api_routes import api_bp  # noqa: F401 (蓝图注册已交给 app_factory)
+from common.routes.screen_routes import screen_bp  # noqa: F401
+from common.routes.ml_routes import ml_bp  # noqa: F401
+from common.routes.chart_routes import chart_bp  # noqa: F401
+from common.routes.assets_routes import assets_bp  # noqa: F401
+from common.routes.update_routes import update_bp  # noqa: F401
+
+# 应用组装（安全钩子 → 蓝图 → 建库）与重模块惰性导出表都在 app_factory 里，
+# 与 win11/app.py 共用同一份，避免两个变体各改各的漂移。
+from common.app_factory import create_app, lazy_export  # noqa: E402
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -189,30 +193,15 @@ except ImportError:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Flask application factory
+# Flask application
+#
+# 组装顺序（安全钩子 → 保存对话框回调 → 建库 → 注册蓝图）统一在
+# common.app_factory.create_app 里；这里只传平台差异（JSON 中文直出）
+# 和 Win7 的 PyQt5 保存对话框。
 # ────────────────────────────────────────────────────────────────────────────
 
-from flask import Flask  # noqa: E402 (must be after common imports)
-
-app = Flask(__name__)
-app.config["JSON_AS_ASCII"] = False  # 让 jsonify 直接输出中文而非 \uXXXX 转义
-
-# Wire up security (headers, CORS, CSRF, rate-limit config)
-register_security(app)
-
-# Register the save-dialog callback so chart_routes can use it
-app.config["SAVE_DIALOG_FN"] = SAVE_DIALOG_FN
-
-# Initialise the SQLite database schema
-init_db()
-
-# Register route blueprints
-app.register_blueprint(api_bp)
-app.register_blueprint(screen_bp)
-app.register_blueprint(ml_bp)
-app.register_blueprint(chart_bp)
-app.register_blueprint(assets_bp)
-app.register_blueprint(update_bp)
+app = create_app(__name__, json_ascii=False, save_dialog_fn=SAVE_DIALOG_FN)
+logger.info("app.py (win7) initialised")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -220,45 +209,12 @@ app.register_blueprint(update_bp)
 #
 # fetcher / indicators / screening 携带 pandas、numpy、baostock（约 2~5s），
 # 路由都是请求时才 ``from app import <名字>``，首次访问才真正导入；
-# 启动器会在 Flask 就绪后用后台线程预热。
+# 导出表见 common/app_factory.py 的 LAZY_HEAVY_EXPORTS。
 # ────────────────────────────────────────────────────────────────────────────
-import importlib as _importlib
-
-_LAZY_HEAVY_EXPORTS = {
-    # common.fetcher
-    'fetcher': 'common.fetcher',
-    'StockDataFetcher': 'common.fetcher',
-    'fetch_kline': 'common.fetcher',
-    'fetch_realtime_tencent_to_db': 'common.fetcher',
-    'random_browser_headers': 'common.fetcher',
-    # common.indicators
-    'prepare_chart_data': 'common.indicators',
-    'calculate_ma': 'common.indicators',
-    'calculate_macd': 'common.indicators',
-    'calculate_rsi': 'common.indicators',
-    'calculate_bollinger': 'common.indicators',
-    'clean_nan_values': 'common.indicators',
-    # common.screening
-    'filter_stocks': 'common.screening',
-    'compute_three_day_change': 'common.screening',
-    'compute_volume_change_pct': 'common.screening',
-    'compute_n_day_change': 'common.screening',
-    'is_limit_up': 'common.screening',
-    'compute_limit_up_pullback': 'common.screening',
-    'compute_big_up_days_count': 'common.screening',
-    'batch_compute_metrics': 'common.screening',
-    'fetch_recent_trading_bars': 'common.screening',
-    # common.preload（路由显式传入 preload_state）
-    'background_preload': 'common.preload',
-}
-
 
 def __getattr__(name):
     """PEP 562：路由 ``from app import <重模块名字>`` 时按需导入。"""
-    mod_name = _LAZY_HEAVY_EXPORTS.get(name)
-    if mod_name is None:
-        raise AttributeError(f"module 'app' has no attribute {name!r}")
-    return getattr(_importlib.import_module(mod_name), name)
+    return lazy_export(name)
 
 
 # ────────────────────────────────────────────────────────────────────────────

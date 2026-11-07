@@ -20,9 +20,9 @@ BUILD_VERSION = update_lib.today_version()
 
 # 仓库根的共享包：PyInstaller 静态分析依赖 --paths + hiddenimports 才能收进单文件 exe
 COMMON_MODULES = [
-    'common', 'common.cache', 'common.config', 'common.db', 'common.fetcher',
-    'common.indicators', 'common.models', 'common.preload', 'common.screening',
-    'common.security', 'common.trading_calendar', 'common.routes',
+    'common', 'common.app_factory', 'common.cache', 'common.config', 'common.db',
+    'common.fetcher', 'common.indicators', 'common.models', 'common.preload',
+    'common.screening', 'common.security', 'common.trading_calendar', 'common.routes',
     'common.routes.api_routes', 'common.routes.chart_routes',
     'common.routes.ml_routes', 'common.routes.screen_routes',
     'common.routes.assets_routes', 'common.routes.update_routes',

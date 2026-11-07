@@ -128,6 +128,36 @@ def compute_n_day_change(code: str, n: int, end_str: str = None) -> Optional[flo
         return None
 
 
+def compute_n_day_change_batch(codes: list, n: int, end_str: str = None) -> dict:
+    """Batch version of :func:`compute_n_day_change`.
+
+    Returns ``{code: float}`` for codes with a computable N-day change; codes
+    lacking enough bars are omitted (same semantics as the single-code version
+    returning ``None``). 全市场排行时逐股点查要 4000+ 次往返，这里合并成一条
+    ``WHERE code IN (...)`` 查询。
+    """
+    if not codes:
+        return {}
+    try:
+        if end_str is None:
+            _, end_str, _ = trading_day_fetch_range(n=n)
+        bars_by_code = read_last_bars_batch(codes, n + 1, end_str)
+    except Exception as e:
+        logger.warning("[compute_n_day_change_batch] %s", e)
+        return {}
+
+    out = {}
+    for code, bars in bars_by_code.items():
+        if not bars or len(bars) < 2:
+            continue
+        c0 = bars[0][0]
+        cn = bars[-1][0]
+        if c0 is None or cn is None or c0 == 0:
+            continue
+        out[code] = round((cn - c0) / c0 * 100, 2)
+    return out
+
+
 def compute_three_day_change(code: str, end_str: str = None) -> Optional[float]:
     """Cumulative price change over the last 3 trading days (percent).
 
@@ -158,15 +188,31 @@ def compute_volume_change_pct(code: str, end_str: str = None) -> Optional[float]
 # Limit-up helpers
 # ---------------------------------------------------------------------------
 
+# 20% 涨停档的板块代码前缀（单一事实来源）：创业板 3xx（含 302）、科创板 688、
+# 科创板 CDR 689。Python 判定与 SQL 片段都从这里派生，避免两边漂移。
+GEM_BOARD_PREFIXES = ('3', '688', '689')
+
+
 def limit_up_threshold(code: str) -> float:
     """涨停阈值按板块区分：创业板/科创板 20%，主板 10%。
 
     689 是科创板 CDR，和 688 同属 20% 档；漏掉它会让 10%~19.5% 的涨幅被误判成涨停。
-    此处与 screen_routes 里 SQL 的 ``LIKE '3%' / '688%' / '689%' / '302%'`` 保持一致。
+    板块前缀取自 GEM_BOARD_PREFIXES，与 screen_routes 的 SQL 阈值片段同源。
     """
-    if code.startswith('3') or code.startswith('688') or code.startswith('689'):
+    if code.startswith(GEM_BOARD_PREFIXES):
         return LIMIT_UP_GEM
     return LIMIT_UP_MAIN_BOARD
+
+
+def limit_up_sql_case(col: str = 'code') -> str:
+    """生成"按板块取涨停阈值"的 SQL CASE 表达式，供 screen_routes 拼接。
+
+    与 limit_up_threshold 同源（GEM_BOARD_PREFIXES + config 阈值常量），保证
+    Python 逐股判定与 SQL 批量筛选的板块口径完全一致。*col* 是代码列名
+    （可带表别名，如 ``m.code``）。阈值是内部常量、列名由调用方写死，无注入面。
+    """
+    when = ' OR '.join("{} LIKE '{}%'".format(col, p) for p in GEM_BOARD_PREFIXES)
+    return 'CASE WHEN {} THEN {} ELSE {} END'.format(when, LIMIT_UP_GEM, LIMIT_UP_MAIN_BOARD)
 
 
 def is_limit_up(code: str, pct_change: float) -> bool:

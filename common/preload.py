@@ -206,6 +206,49 @@ def load_preload_state():
 
 
 _preload_state_lock = threading.Lock()
+# 完成水位线：codes 前缀 [0, watermark) 已全部处理完。线程池乱序完成，
+# 不能拿"最后完成的那只"当断点（会跳过它前面还没跑完的）；只在水位线连续
+# 推进时落盘，恢复时从水位线之后继续，保证不重不漏。
+_checkpoint_watermark = 0
+_checkpoint_codes = []  # type: list
+_checkpoint_done = set()  # type: set  # 已完成但位于水位线之后的下标
+
+
+def _reset_checkpoint(codes):
+    # type: (list) -> None
+    global _checkpoint_watermark, _checkpoint_codes, _checkpoint_done
+    with _preload_state_lock:
+        _checkpoint_codes = codes
+        _checkpoint_watermark = 0
+        _checkpoint_done = set()
+
+
+def _advance_checkpoint(idx):
+    # type: (int) -> None
+    """标记第 *idx* 只（相对本轮 codes）处理完，推进连续水位线并按需落盘。
+
+    乱序完成时先把下标记入集合；只有水位线处完成才连续前移，把集合里
+    紧挨着的已完成下标一并吃掉。落盘的是水位线前最后一只代码，恢复时
+    ``codes.index(last_code)+1`` 正好等于水位线，不重不漏。
+    """
+    global _checkpoint_watermark
+    with _preload_state_lock:
+        _checkpoint_done.add(idx)
+        codes = _checkpoint_codes
+        wm = _checkpoint_watermark
+        while wm in _checkpoint_done:
+            _checkpoint_done.discard(wm)
+            wm += 1
+        if wm == _checkpoint_watermark:
+            return  # 水位线没动，无需落盘
+        _checkpoint_watermark = wm
+        if not codes or wm > len(codes):
+            return
+        payload = {
+            "last_code": codes[wm - 1],
+            "last_time": datetime.now().isoformat(),
+        }
+    save_preload_state(payload)
 
 
 def save_preload_state(state):
@@ -287,12 +330,14 @@ def background_preload(state=None):
         if last_code and last_code in codes:
             start_idx = codes.index(last_code) + 1
         codes = codes[start_idx:]
+        _reset_checkpoint(codes)
         state._set_total(len(codes))
         state._set_message(
             "Preloading (0/{}), resuming from offset {}...".format(len(codes), start_idx)
         )
 
-        def _preload_one(code):
+        def _preload_one(item):
+            idx, code = item
             if state.stop_event.is_set():
                 return
             try:
@@ -312,10 +357,6 @@ def background_preload(state=None):
                         gap = (today - db_latest).days
                         if gap <= 1:
                             state._record_skip()
-                            save_preload_state({
-                                "last_code": code,
-                                "last_time": datetime.now().isoformat(),
-                            })
                             return
                         elif gap <= 7:
                             fetch_days = 3
@@ -328,17 +369,13 @@ def background_preload(state=None):
                 if df is not None and not df.empty:
                     save_kline_to_db(code, df)
                 state._record_success()
-                save_preload_state({
-                    "last_code": code,
-                    "last_time": datetime.now().isoformat(),
-                })
             except Exception as e:
                 logger.info("[preload] %s failed: %s: %s", code, type(e).__name__, e)
                 state._record_failure()
-                save_preload_state({
-                    "last_code": code,
-                    "last_time": datetime.now().isoformat(),
-                })
+            finally:
+                # 成功/跳过/失败都算"处理完"，统一推进水位线；停止时未启动的
+                # 任务不会到这里，水位线停在真实完成处，下次从其后继续
+                _advance_checkpoint(idx)
 
         # Chunked loading: 1000 stocks per segment, pause between segments
         # 分段加载并在段间停顿，避免对行情源形成长时间持续高频请求而被风控封禁
@@ -347,7 +384,7 @@ def background_preload(state=None):
         for i in range(0, len(codes), chunk_size):
             if state.stop_event.is_set():
                 break
-            chunk = codes[i:i + chunk_size]
+            chunk = list(enumerate(codes[i:i + chunk_size], start=i))
             with ThreadPoolExecutor(max_workers=8) as executor:
                 list(executor.map(_preload_one, chunk))
             if i + chunk_size < len(codes) and not state.stop_event.is_set():
@@ -356,8 +393,9 @@ def background_preload(state=None):
                 )
                 time.sleep(pause_seconds)
 
-        # Clear checkpoint after full completion
-        clear_preload_state()
+        # 只有整轮跑完（未被停止）才清断点；中途停止保留水位线供下次续跑
+        if not state.stop_event.is_set():
+            clear_preload_state()
 
         # --- Step 2: batch realtime quotes ---
         if not state.stop_event.is_set():

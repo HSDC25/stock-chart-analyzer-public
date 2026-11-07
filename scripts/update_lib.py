@@ -11,6 +11,8 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import shutil
+import subprocess  # nosec B404 - 固定调用 powershell 做 CMS 签名
 import zipfile
 from pathlib import Path
 
@@ -110,6 +112,75 @@ def make_ui_zip(variant: str, version: str, dest: Path) -> Path:
     return dest
 
 
+DEFAULT_SIGN_SUBJECT = 'CN=HSDC StockChart Code Signing, O=HSDC'
+
+# 用 .NET 的 SignedCms 生成 detached PKCS#7：zip 不是 PE，signtool 签不了。
+# 私钥优先取用户证书存储（与 sign_executables.ps1 一致），没有则回落到 PFX
+# （路径/密码走环境变量，避免把口令写进仓库）。
+_SIGN_PS = r'''
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+$cert = $null
+if ($env:SC_UI_PFX -and (Test-Path $env:SC_UI_PFX)) {
+    $sec = ConvertTo-SecureString -String $env:SC_UI_PFX_PASSWORD -AsPlainText -Force
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($env:SC_UI_PFX, $sec)
+} else {
+    $cert = Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object {
+                $_.Subject -eq $env:SC_UI_SUBJECT -and
+                $_.HasPrivateKey -and
+                ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3')
+            } |
+            Sort-Object NotAfter -Descending | Select-Object -First 1
+}
+if (-not $cert) { throw "找不到代码签名证书 $($env:SC_UI_SUBJECT)" }
+$bytes = [IO.File]::ReadAllBytes($env:SC_UI_PATH)
+$content = New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$bytes)
+$cms = New-Object System.Security.Cryptography.Pkcs.SignedCms($content, $true)
+$signer = New-Object System.Security.Cryptography.Pkcs.CmsSigner($cert)
+$signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
+$cms.ComputeSignature($signer)
+[Convert]::ToBase64String($cms.Encode())
+'''
+
+
+def _powershell_exe() -> str:
+    """优先 pwsh 7（项目默认），没有才退回 Windows PowerShell。"""
+    for name in ('pwsh', 'powershell'):
+        found = shutil.which(name)
+        if found:
+            return found
+    return 'powershell'
+
+
+def sign_ui_payload(path: Path, cert_subject: str = DEFAULT_SIGN_SUBJECT,
+                    timeout: int = 120) -> str:
+    """对 UI 包做 detached PKCS#7 签名，返回 base64；失败时抛 RuntimeError。
+
+    客户端的 ``verify_detached_signature`` 会校验摘要并把签名者证书指纹钉到
+    ``common/updater.py`` 的白名单上，两边必须用同一张证书。
+    """
+    if os.name != 'nt':
+        raise RuntimeError('界面包签名依赖 Windows 证书存储，当前平台不可用')
+    env = dict(os.environ)
+    env['SC_UI_PATH'] = str(Path(path).resolve())
+    env['SC_UI_SUBJECT'] = cert_subject
+    pfx = env.get('STOCKCHART_SIGN_PFX') or ''
+    if pfx:
+        env['SC_UI_PFX'] = pfx
+        env['SC_UI_PFX_PASSWORD'] = env.get('STOCKCHART_SIGN_PFX_PASSWORD', '')
+    proc = subprocess.run(  # nosec B603 - 固定参数，无可注入片段
+        [_powershell_exe(), '-NoProfile', '-NonInteractive',
+         '-ExecutionPolicy', 'Bypass', '-Command', _SIGN_PS],
+        capture_output=True, text=True, timeout=timeout, env=env,
+    )
+    out = (proc.stdout or '').strip()
+    if proc.returncode != 0 or not out:
+        raise RuntimeError((proc.stderr or out or '签名命令失败').strip())
+    # PowerShell 可能带回 BOM/换行，压成单行 base64
+    return ''.join(out.split())
+
+
 def iter_sidecars() -> list:
     found = []
     for dirpath in (REPO / 'win7' / 'outputs', REPO / 'win11' / 'outputs'):
@@ -154,6 +225,13 @@ def build_manifest(base_url: str, out_dir: Path, notes: str = '',
         zip_version = ui_version or version
         ui_zip = make_ui_zip(variant, zip_version, out_dir / f'{variant}_ui.zip')
         ui_sha = sha256_file(ui_zip)
+        # 界面包必须带官方签名，否则新版客户端会拒收（zip 做不了 Authenticode）
+        try:
+            ui_sig = sign_ui_payload(ui_zip)
+        except Exception as exc:
+            ui_sig = ''
+            print(f'[WARN] {variant}: 界面包签名失败（{exc}）；'
+                  f'这份清单到了新版客户端会被拒绝做界面热更，请先修好证书再发布')
 
         variants[variant] = {
             'version': version,
@@ -164,6 +242,7 @@ def build_manifest(base_url: str, out_dir: Path, notes: str = '',
             'ui_url': f'{base}/{ui_zip.name}',
             'ui_sha256': ui_sha,
             'ui_size': ui_zip.stat().st_size,
+            'ui_sig': ui_sig,
             'notes': notes,
         }
         files[variant] = {'exe': exe, 'ui': ui_zip}

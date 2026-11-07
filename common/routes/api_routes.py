@@ -14,8 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -111,28 +110,26 @@ def api_rank_monthly_top():
     try:
         from common.config import DB_PATH
 
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-
-        # 月度涨幅 ≈ 最近 20 个交易日：OFFSET 19 取到最新日之前第 20 个交易日的
-        # 收盘价作为基期，与最新收盘价相除得涨幅
-        query = '''
-            SELECT a.code, a.name, a.price, a.change_pct, a.pe, a.pb, a.market_cap,
-                   ROUND((latest.close - ago.close) / ago.close * 100, 2) as monthly_change
-            FROM stock_metadata a
-            JOIN kline_data latest ON latest.code = a.code
-              AND latest.date = (SELECT MAX(date) FROM kline_data)
-            JOIN kline_data ago ON ago.code = a.code
-              AND ago.date = (SELECT date FROM kline_data
-                              WHERE date < (SELECT MAX(date) FROM kline_data)
-                              ORDER BY date DESC LIMIT 1 OFFSET 19)
-            WHERE a.price > 0 AND latest.close > 0 AND ago.close > 0
-            AND a.name NOT LIKE 'ST%' AND a.name NOT LIKE '*ST%'
-            AND a.name NOT LIKE 'SST%' AND a.name NOT LIKE 'S*ST%'
-            ORDER BY monthly_change DESC
-            LIMIT 50
-        '''
-        df = pd.read_sql_query(query, conn)
-        conn.close()
+        with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
+            # 月度涨幅 ≈ 最近 20 个交易日：OFFSET 19 取到最新日之前第 20 个交易日的
+            # 收盘价作为基期，与最新收盘价相除得涨幅
+            query = '''
+                SELECT a.code, a.name, a.price, a.change_pct, a.pe, a.pb, a.market_cap,
+                       ROUND((latest.close - ago.close) / ago.close * 100, 2) as monthly_change
+                FROM stock_metadata a
+                JOIN kline_data latest ON latest.code = a.code
+                  AND latest.date = (SELECT MAX(date) FROM kline_data)
+                JOIN kline_data ago ON ago.code = a.code
+                  AND ago.date = (SELECT date FROM kline_data
+                                  WHERE date < (SELECT MAX(date) FROM kline_data)
+                                  ORDER BY date DESC LIMIT 1 OFFSET 19)
+                WHERE a.price > 0 AND latest.close > 0 AND ago.close > 0
+                AND a.name NOT LIKE 'ST%' AND a.name NOT LIKE '*ST%'
+                AND a.name NOT LIKE 'SST%' AND a.name NOT LIKE 'S*ST%'
+                ORDER BY monthly_change DESC
+                LIMIT 50
+            '''
+            df = pd.read_sql_query(query, conn)
 
         records = df.to_dict('records')
         for r in records:
@@ -231,11 +228,11 @@ def api_stocks():
         # Add 30-day big-up-days metric (for display)
         if top100 is not None and len(top100) > 0:
             bu_list = []
-            conn = sqlite3.connect(DB_PATH, timeout=30.0)
-            for code in top100['code']:
-                bu = compute_big_up_days_count(code, days=30, threshold=3.5, conn=conn)
-                bu_list.append(bu)
-            conn.close()
+            with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
+                for code in top100['code']:
+                    bu_list.append(
+                        compute_big_up_days_count(code, days=30, threshold=3.5, conn=conn)
+                    )
             top100['big_up_days_30'] = bu_list
 
         records = top100.to_dict('records')
@@ -263,7 +260,7 @@ def api_top_change():
     """N-day cumulative change ranking API: compute market-wide N-day change, return top 50."""
     try:
         from common.models import is_allowed_stock_code
-        from common.screening import compute_n_day_change
+        from common.screening import compute_n_day_change_batch
         from common.trading_calendar import trading_day_fetch_range
 
         n = request.args.get('days', 3, type=int)
@@ -277,17 +274,9 @@ def api_top_change():
         all_codes = stock_list['code'].tolist()
         all_codes = [c for c in all_codes if is_allowed_stock_code(c)]
 
-        results = {}
-
-        def _compute_one(code):
-            return (code, compute_n_day_change(code, n, end_str))
-
-        with ThreadPoolExecutor(max_workers=20) as ex:
-            futures = [ex.submit(_compute_one, c) for c in all_codes]
-            for f in as_completed(futures):
-                code, chg = f.result()
-                if chg is not None:
-                    results[code] = chg
+        # 一条 IN 查询算出全市场 N 日涨幅：逐股提交到线程池时全市场要 4000+ 次
+        # SQLite 往返，耗时几乎全在查询开销上，与 CPU 并行度无关
+        results = compute_n_day_change_batch(all_codes, n, end_str)
 
         ranked = sorted(results.items(), key=lambda x: x[1], reverse=True)[:50]
 
@@ -362,39 +351,28 @@ def api_kline(code):
 @api_bp.route('/api/market_status')
 def api_market_status():
     """A-share market open/closed status."""
+    from common.trading_calendar import is_market_open_now, is_trading_day
+
     now = datetime.now()
+    current_time = now.strftime('%Y-%m-%d %H:%M:%S')
 
-    if now.weekday() >= 5:
+    # 节假日表和交易时段都以 trading_calendar 为准：这里再抄一份"周一到周五"的判断，
+    # 国庆/春节这类长假期就会把休市报成"交易中"或"非交易时段"
+    if not is_trading_day(now):
+        reason = '周末休市' if now.weekday() >= 5 else '节假日休市'
         return jsonify({
             'success': True,
             'is_market_closed': True,
-            'current_time': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'reason': '周末休市',
+            'current_time': current_time,
+            'reason': reason,
         })
 
-    time_str = now.strftime('%H:%M')
-    morning_start = '09:30'
-    morning_end = '11:30'
-    afternoon_start = '13:00'
-    afternoon_end = '15:00'
-
-    is_trading = (morning_start <= time_str <= morning_end) or \
-                 (afternoon_start <= time_str <= afternoon_end)
-
-    if is_trading:
-        return jsonify({
-            'success': True,
-            'is_market_closed': False,
-            'current_time': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'reason': '交易中',
-        })
-    else:
-        return jsonify({
-            'success': True,
-            'is_market_closed': True,
-            'current_time': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'reason': '非交易时段',
-        })
+    return jsonify({
+        'success': True,
+        'is_market_closed': not is_market_open_now(now),
+        'current_time': current_time,
+        'reason': '交易中' if is_market_open_now(now) else '非交易时段',
+    })
 
 
 @api_bp.route('/api/default-save-dir')
@@ -413,20 +391,19 @@ def api_rank_top3day():
 
         limit = int(request.args.get('limit', 50))
 
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-        query = '''
-            SELECT code, name, price, change_pct,
-                   COALESCE(three_day_change, 0) as three_day_change,
-                   pe, pb, market_cap, volume
-            FROM stock_metadata
-            WHERE three_day_change IS NOT NULL AND price > 0
-            AND name NOT LIKE 'ST%' AND name NOT LIKE '*ST%'
-            AND name NOT LIKE 'SST%' AND name NOT LIKE 'S*ST%'
-            ORDER BY three_day_change DESC
-            LIMIT ?
-        '''
-        df = pd.read_sql_query(query, conn, params=(limit,))
-        conn.close()
+        with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
+            query = '''
+                SELECT code, name, price, change_pct,
+                       COALESCE(three_day_change, 0) as three_day_change,
+                       pe, pb, market_cap, volume
+                FROM stock_metadata
+                WHERE three_day_change IS NOT NULL AND price > 0
+                AND name NOT LIKE 'ST%' AND name NOT LIKE '*ST%'
+                AND name NOT LIKE 'SST%' AND name NOT LIKE 'S*ST%'
+                ORDER BY three_day_change DESC
+                LIMIT ?
+            '''
+            df = pd.read_sql_query(query, conn, params=(limit,))
 
         records = df.to_dict('records')
         for r in records:
@@ -451,26 +428,24 @@ def api_rank_top5day():
 
         limit = int(request.args.get('limit', 50))
 
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-
-        query = '''
-            SELECT a.code, a.name, a.price, a.change_pct, a.pe, a.pb, a.market_cap,
-                   ROUND((latest.close - ago.close) / ago.close * 100, 2) as five_day_change
-            FROM stock_metadata a
-            JOIN kline_data latest ON latest.code = a.code
-              AND latest.date = (SELECT MAX(date) FROM kline_data)
-            JOIN kline_data ago ON ago.code = a.code
-              AND ago.date = (SELECT date FROM kline_data
-                              WHERE date < (SELECT MAX(date) FROM kline_data)
-                              ORDER BY date DESC LIMIT 1 OFFSET 4)
-            WHERE a.price > 0 AND latest.close > 0 AND ago.close > 0
-            AND a.name NOT LIKE 'ST%' AND a.name NOT LIKE '*ST%'
-            AND a.name NOT LIKE 'SST%' AND a.name NOT LIKE 'S*ST%'
-            ORDER BY five_day_change DESC
-            LIMIT ?
-        '''
-        df = pd.read_sql_query(query, conn, params=(limit,))
-        conn.close()
+        with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
+            query = '''
+                SELECT a.code, a.name, a.price, a.change_pct, a.pe, a.pb, a.market_cap,
+                       ROUND((latest.close - ago.close) / ago.close * 100, 2) as five_day_change
+                FROM stock_metadata a
+                JOIN kline_data latest ON latest.code = a.code
+                  AND latest.date = (SELECT MAX(date) FROM kline_data)
+                JOIN kline_data ago ON ago.code = a.code
+                  AND ago.date = (SELECT date FROM kline_data
+                                  WHERE date < (SELECT MAX(date) FROM kline_data)
+                                  ORDER BY date DESC LIMIT 1 OFFSET 4)
+                WHERE a.price > 0 AND latest.close > 0 AND ago.close > 0
+                AND a.name NOT LIKE 'ST%' AND a.name NOT LIKE '*ST%'
+                AND a.name NOT LIKE 'SST%' AND a.name NOT LIKE 'S*ST%'
+                ORDER BY five_day_change DESC
+                LIMIT ?
+            '''
+            df = pd.read_sql_query(query, conn, params=(limit,))
 
         records = df.to_dict('records')
         for r in records:

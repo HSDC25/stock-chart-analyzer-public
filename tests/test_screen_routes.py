@@ -52,11 +52,14 @@ def _seed(db):
     save_kline_to_db("689001", _frame([0] * 17 + [12, 12, 12], [100] * 20), db_path=db)
     # 数据停在上一交易日（停牌/未更新），不应算作"当前连板"
     save_kline_to_db("600005", _frame([0] * 17 + [10, 10], [100] * 19), db_path=db)
+    # 首板：此前 19 天无涨停，仅最新一天涨停（主板 10%）
+    save_kline_to_db("600006", _frame([0] * 19 + [10], [100] * 20), db_path=db)
 
     conn = sqlite3.connect(db)
     rows = [("600001", "连板四", 14.0, 10.0), ("600002", "连板二", 12.0, 10.0),
             ("600003", "缩量回调", 10.15, -1.0), ("600004", "新高突破", 10.3, 3.0),
-            ("689001", "科创CDR", 14.0, 12.0), ("600005", "停牌股", 12.0, 10.0)]
+            ("689001", "科创CDR", 14.0, 12.0), ("600005", "停牌股", 12.0, 10.0),
+            ("600006", "今日首板", 11.0, 10.0)]
     conn.executemany(
         "INSERT INTO stock_metadata (code, name, price, change_pct) VALUES (?, ?, ?, ?)", rows)
     conn.commit()
@@ -155,3 +158,63 @@ def test_is_limit_up_treats_689_as_star_board():
     assert is_limit_up("688001", 19.6)
     assert is_limit_up("302001", 19.6)
     assert is_limit_up("600001", 9.8)
+
+
+def test_limit_up_sql_case_matches_python_threshold():
+    # SQL 阈值片段必须与 Python 逐股判定同源，尤其 689 不能漏（M1 回归）
+    from common.screening import limit_up_sql_case, limit_up_threshold
+    conn = sqlite3.connect(":memory:")
+    try:
+        expr = limit_up_sql_case("code")
+        for code in ("600001", "000001", "300001", "302001", "688001", "689001"):
+            got = conn.execute(
+                "SELECT {} FROM (SELECT ? AS code)".format(expr), (code,)
+            ).fetchone()[0]
+            assert got == limit_up_threshold(code), code
+    finally:
+        conn.close()
+
+
+def test_first_limit_up_uses_star_board_threshold_for_689(client):
+    # 689001 当日涨 12%：20% 档不算涨停，不能进首板列表（旧 SQL 漏 689 会误纳）；
+    # 600006 此前无涨停、今日主板 10% 涨停，应入选
+    codes = _codes(client.get("/api/screen/first_limit_up"))
+    assert "689001" not in codes
+    assert "600006" in codes
+
+
+@pytest.mark.parametrize("url", [
+    "/api/screen/first_limit_up",
+    "/api/screen/limit_up_volume",
+    "/api/screen/volume_surge",
+    "/api/screen/consecutive_up",
+    "/api/screen/limit_up_pullback",
+    "/api/screen/big_up_days",
+    "/api/screen/limit_up_days",
+    "/api/screen/consecutive_limit_up",
+    "/api/screen/shrink_pullback",
+    "/api/screen/new_high_breakout",
+])
+def test_all_screen_routes_respond_with_json(client, url):
+    # 覆盖全部路由：连接生命周期改造（with closing）后每条路径都必须能正常收尾
+    resp = client.get(url)
+    assert resp.status_code == 200, url
+    payload = resp.get_json()
+    assert payload["success"] is True, url
+    assert isinstance(payload["data"], list), url
+
+
+def test_bad_numeric_params_fall_back_instead_of_500(client):
+    # 坏参数不应把接口打成 500，也不该让 limit 失控把整库拉出来
+    for url in ("/api/screen/first_limit_up?limit=abc",
+                "/api/screen/big_up_days?days=abc&threshold=xyz",
+                "/api/screen/consecutive_limit_up?min_boards=-5",
+                "/api/screen/new_high_breakout?days=999999&vol_ratio=oops"):
+        resp = client.get(url)
+        assert resp.status_code == 200, url
+        assert resp.get_json()["success"] is True, url
+
+
+def test_limit_param_is_clamped(client):
+    rows = client.get("/api/screen/first_limit_up?limit=999999999").get_json()["data"]
+    assert len(rows) <= 1000
