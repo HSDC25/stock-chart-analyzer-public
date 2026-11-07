@@ -16,6 +16,23 @@
 
 ## 一、启用配置即代码（一次性，5 分钟）
 
+> **前置：允许 VCS root 读本机路径。** TeamCity 默认禁止 `file:` 形式的 URL
+> （"Local file URLs are forbidden for security reasons"），而我们的仓库就在本机。
+> 单机开发 CI 可以打开这个开关——在 TeamCity 数据目录下建
+> `C:\ProgramData\JetBrains\TeamCity\config\teamcity-internal.properties`：
+>
+> ```properties
+> teamcity.git.allowFileUrl=true
+> ```
+>
+> 然后**用管理员 PowerShell 重启服务**（这一步必须你自己执行，普通权限改不了服务）：
+>
+> ```powershell
+> Restart-Service TeamCity
+> ```
+>
+> 重启后项目会自动从 VCS 同步配置，`http://localhost:8111/project/StockChart` 里就能看到两条流水线。
+
 1. 打开 <http://localhost:8111/> 登录管理员。
 2. 进入 **Administration → Projects → StockChart**（没有就新建一个空项目）
    → 右上 **Versioned Settings**。
@@ -29,8 +46,14 @@
    （即 git 里的配置说了算；在网页上改会被下次同步覆盖）
 7. **Apply**。TeamCity 会同步 `settings.kts`，随后项目里出现上面两条流水线。
 
+> 本机已经用 REST API 做好了项目 `StockChart`、设置用的 VCS root
+> `StockChart_LocalRepo` 以及"版本化设置=开启 / 格式=Kotlin / 路径=`.teamcity` /
+> 冲突时以 VCS 为准"这几项配置。差的就是上面那次重启——重启前项目是只读的，
+> 因为你还没有可同步的配置。
+
 > 如果第一次同步报错，多半是版本不匹配：把 `settings.kts` 第一行的
-> `version = "2024.07"` 改成你 TeamCity 的版本（页脚可见）。
+> `version = "2026.2"` 改成你 TeamCity 的版本（本机是 2026.2，build 239308；
+> 版本号可在登录页页脚或 `http://localhost:8111/login.html` 里看到）。
 
 ## 二、给代理准备密钥（一次性）
 
@@ -125,6 +148,7 @@ TeamCity 的 VCS Trigger 在 60 秒内（quiet period）自动起一次 `测试�
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
+| `Local file URLs are forbidden for security reasons` | 没加 `teamcity.git.allowFileUrl=true`，或加了没重启 TeamCity |
 | 同步报 `version` 不匹配 | 改 `settings.kts` 首行 `version` 为当前 TeamCity 版本 |
 | 构建报「找不到 pwsh」 | 代理 PATH 里没有 pwsh 7；把 `C:\Program Files\PowerShell\7` 加进系统 PATH 后重启服务 |
 | `run_tests.ps1` 报找不到 pytest | 设 `STOCKCHART_TEST_PYTHON` 指向带 pytest 的解释器 |
