@@ -13,7 +13,7 @@ import jetbrains.buildServer.configs.kotlin.buildSteps.script
 import jetbrains.buildServer.configs.kotlin.triggers.vcs
 import jetbrains.buildServer.configs.kotlin.vcs.GitVcsRoot
 
-version = "2026.2"
+version = "2026.2.2"
 
 project {
     vcsRoot(StockChartLocal)
