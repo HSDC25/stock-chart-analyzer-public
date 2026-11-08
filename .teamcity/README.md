@@ -128,6 +128,7 @@ icacls "C:\ProgramData\StockChart\secrets" /inheritance:r `
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | 提交带 `[release]` 但没反应 | 钩子没装：`pwsh -NoProfile -File scripts\ci\install_hooks.ps1`；或 pwsh 不在 PATH |
+| 钩子装了还是不跑 | 本仓库 `core.hooksPath` 指向 `C:\Users\ASUS\.empty-hooks`（git-lfs 的钩子目录），git 不读 `.git\hooks`。安装脚本会自动装到 hooksPath 里；不放心可以 `git config --get core.hooksPath` 核对 |
 | 提示 `bad interpreter: /bin/sh^M` | 钩子被写成了 CRLF：重跑安装脚本（它强制写 LF） |
 | `另一个发布进程还在跑（PID …）` | 两次发版撞车。等前一个结束，或确认它已卡死后删 `build\logs\release.lock` |
 | `[FAIL] 线上清单与本机不一致` | 清单没传完或被 CDN 缓存。重跑 `release.ps1 -PublishOnly` |

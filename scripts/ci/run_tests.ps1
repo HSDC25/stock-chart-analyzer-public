@@ -64,15 +64,21 @@ $python = Resolve-Python -Explicit $Python
 
 # 签名相关用例需要一张可用的代码签名证书。代理跑在 LocalSystem 下看不到 ASUS 的
 # 用户证书库，会整组 skip；能读到本机密钥库里的 PFX 就改走 PFX，让这条链路也进 CI。
+# PFX 与口令分开判断：上游（如 release.ps1）可能已经设了 PFX 但没设口令，
+# 把口令加载写进"没设 PFX"的分支里会让签名用例静默 skip。
+$secretDir = 'C:\ProgramData\StockChart\secrets'
 if (-not $env:STOCKCHART_SIGN_PFX) {
-    $defaultPfx = 'C:\ProgramData\StockChart\secrets\stockchart-codeSigning.pfx'
+    $defaultPfx = Join-Path $secretDir 'stockchart-codeSigning.pfx'
     if (Test-Path $defaultPfx) {
         $env:STOCKCHART_SIGN_PFX = $defaultPfx
-        $pwFile = 'C:\ProgramData\StockChart\secrets\pfx_password.txt'
-        if (-not $env:STOCKCHART_SIGN_PFX_PASSWORD -and (Test-Path $pwFile)) {
-            $env:STOCKCHART_SIGN_PFX_PASSWORD = (Get-Content $pwFile -Raw).Trim()
-        }
         Write-Host "[ci] 签名用例使用 PFX: $defaultPfx"
+    }
+}
+if (-not $env:STOCKCHART_SIGN_PFX_PASSWORD) {
+    $pwFile = $env:STOCKCHART_SIGN_PFX_PASSWORD_FILE
+    if (-not $pwFile) { $pwFile = Join-Path $secretDir 'pfx_password.txt' }
+    if (Test-Path $pwFile) {
+        $env:STOCKCHART_SIGN_PFX_PASSWORD = (Get-Content $pwFile -Raw).Trim()
     }
 }
 
