@@ -95,7 +95,8 @@ if (-not $SkipBuild) {
                           'win7\build_win7_browser.py',
                           'win11\build_win11_webview.py')) {
         Write-Host "[1/3] 运行 $script"
-        & $python (Join-Path $repo $script)
+        # 原生进程的输出不走 PowerShell 流，Start-Transcript 收不到；过一遍管道才进日志
+        & $python (Join-Path $repo $script) 2>&1 | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "构建失败：$script（exit $LASTEXITCODE）" }
     }
 } else {
@@ -147,7 +148,7 @@ $publishArgs = @((Join-Path $repo 'scripts\publish_update.py'),
                  '--out', (Join-Path $repo $OutDir))
 if ($Notes) { $publishArgs += @('--notes', $Notes) }
 if ($UiVersion) { $publishArgs += @('--ui-version', $UiVersion) }
-& $python $publishArgs
+& $python $publishArgs 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "生成清单失败（exit $LASTEXITCODE）" }
 
 $manifest = Join-Path $repo "$OutDir\update.json"
@@ -170,7 +171,7 @@ if (-not $Publish) {
 Write-Host "`n[4/4] 上传到更新服务器"
 $republishArgs = @((Join-Path $repo 'scripts\republish_update.py'))
 if ($DryRun) { $republishArgs += '--dry-run' }
-& $python $republishArgs
+& $python $republishArgs 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "上传失败（exit $LASTEXITCODE）" }
 if ($DryRun) {
     Write-Host '[dry-run] 校验通过，没有上传'

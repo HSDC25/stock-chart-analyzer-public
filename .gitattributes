@@ -23,6 +23,10 @@
 *.cmd     text eol=crlf
 *.ps1     text eol=crlf
 
+# Git 钩子由 sh 执行：必须是 LF，否则 shebang 变成 /bin/sh^M 直接报错
+.githooks/* text eol=lf
+*.sh        text eol=lf
+
 # 二进制文件：不做换行转换，不参与文本 diff
 *.png     binary
 *.jpg     binary

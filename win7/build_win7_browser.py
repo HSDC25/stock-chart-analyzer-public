@@ -20,7 +20,7 @@ import update_lib  # noqa: E402
 BUILD_VERSION = update_lib.today_version()
 
 COMMON_MODULES = [
-    'common', 'common.cache', 'common.config', 'common.db', 'common.fetcher',
+    'common', 'common.app_factory', 'common.cache', 'common.config', 'common.db', 'common.fetcher',
     'common.indicators', 'common.models', 'common.preload', 'common.screening',
     'common.security', 'common.trading_calendar', 'common.routes',
     'common.routes.api_routes', 'common.routes.chart_routes',

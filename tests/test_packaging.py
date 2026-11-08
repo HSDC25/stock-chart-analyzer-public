@@ -169,12 +169,10 @@ def test_gitignore_covers_signing_material():
         assert pattern in lines, '.gitignore 缺少 %s' % pattern
 
 
-def test_teamcity_password_param_is_masked():
-    """口令必须是 Password 类型参数，不能是普通 text 参数。"""
-    with io.open(os.path.join(ROOT, '.teamcity', 'settings.kts'), encoding='utf-8') as fh:
-        text = fh.read()
-    assert 'password("env.STOCKCHART_SIGN_PFX_PASSWORD"' in text
-    assert 'text("env.STOCKCHART_SIGN_PFX_PASSWORD"' not in text
-    # 口令不能硬编码在 DSL 里：声明处的第二个参数必须是空串
-    m = re.search(r'password\("env\.STOCKCHART_SIGN_PFX_PASSWORD"\s*,\s*"([^"]*)"', text)
-    assert m and m.group(1) == '', 'DSL 里不要把 PFX 口令写成字面量'
+def test_no_inert_teamcity_dsl():
+    """配置即代码在本机 TeamCity 跑不起来（服务端 DSL 沙箱坏了），已改网页手工建。
+
+    留一份永远不会被同步的 settings.kts 只会让人以为改它有用。
+    """
+    leftover = glob.glob(os.path.join(ROOT, '.teamcity', '*.kts'))
+    assert not leftover, '这些 DSL 文件不会被同步，删掉：%s' % leftover

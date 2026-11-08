@@ -1,0 +1,38 @@
+#!/bin/sh
+# 提交后做两件事：
+#   1. 备份到 PDS（scripts/pds_backup.py，原来由 `--install-hook` 单独安装，合并到这里）
+#   2. 提交信息带 [release] 时启动发版流水线
+#
+#   git commit -m "修复涨停统计漏算科创板 [release]"
+#
+# 安装/更新：pwsh -NoProfile -File scripts\ci\install_hooks.ps1
+# 钩子永远以 0 退出：这些是提交之后的事，不能反过来弄坏提交。
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$repo" || exit 0
+
+# ── 1. PDS 自动备份 ──────────────────────────────────────────────────────
+if [ -f "$repo/scripts/pds_backup.py" ]; then
+  py="/c/Users/ASUS/AppData/Local/Programs/Python/Python314/python.exe"
+  [ -x "$py" ] || py=$(command -v python 2>/dev/null)
+  if [ -n "$py" ]; then
+    "$py" "$repo/scripts/pds_backup.py" >> "$repo/.git/pds-backup.log" 2>&1
+  fi
+fi
+
+# ── 2. [release] 触发发版 ────────────────────────────────────────────────
+msg=$(git log -1 --pretty=%s 2>/dev/null)
+case "$msg" in
+  *"[release]"*) ;;
+  *) exit 0 ;;
+esac
+
+pwsh -NoProfile -ExecutionPolicy Bypass -Command \
+  "Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$repo/scripts/ci/release.ps1') -WorkingDirectory '$repo' -WindowStyle Minimized" \
+  >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+  echo "[release] 启动失败：确认 pwsh 7 在 PATH 上，或手动跑 pwsh -NoProfile -File scripts/ci/release.ps1"
+  exit 0
+fi
+echo "[release] 已在后台启动发布流水线，进度见 build/logs/release-*.log"
+exit 0

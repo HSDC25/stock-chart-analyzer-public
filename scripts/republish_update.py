@@ -8,9 +8,13 @@
 用法：
     python scripts/publish_update.py --notes "..."        # 先生成本地 update_dist/
     python scripts/republish_update.py                    # 传包体 + 校验 + 传清单
+    python scripts/republish_update.py --force            # 与服务器 sha 相同的包也重传
     python scripts/republish_update.py --dry-run          # 只解析与核对本地文件
     python scripts/republish_update.py --exe-version 2026.10.04
         # 把清单里所有 version 改写成该值（见下）
+
+服务器上已有且 sha256 相同的包体会被跳过（通常只传当天新产生的包），
+这样一次发布往往只传几个文件而不是全部 14 个（约 1GB）。
 """
 from __future__ import annotations
 
@@ -60,6 +64,8 @@ def parse_args(argv=None):
                    help='改写清单里每个变体的 version。装机基数里若还有换体脚本坏掉的包，'
                         '必须把它压在装机版本上，否则那些机器每次启动都白下一个完整包')
     p.add_argument('--skip-upload', action='store_true', help='只做校验，不上传')
+    p.add_argument('--force', action='store_true',
+                   help='即使服务器上的 sha 与本机一致也重传（换机器/怀疑文件损坏时用）')
     p.add_argument('--dry-run', action='store_true', help='连服务器都不连，只核对本地产物')
     return p.parse_args(argv)
 
@@ -81,17 +87,37 @@ def scp(key: Path, files: list, target: str) -> int:
 
 
 def server_shas(key: Path, host: str, remote_dir: str, names: list) -> dict:
+    """返回服务器上已存在文件的 sha256；不存在的文件不出现在结果里。
+
+    sha256sum 遇到缺失文件会退出 1，所以命令末尾补 ``|| true``，只看 stdout。
+    """
     quoted = ' '.join(names)
-    out = subprocess.check_output(  # nosec B603 - names 来自清单文件名，已在本机解析过
+    proc = subprocess.run(  # nosec B603 - names 来自清单文件名，已在本机解析过
         ['ssh', '-i', str(key)] + SSH_OPTS.split()
-        + [host, f'cd {remote_dir} && sha256sum {quoted}'],
-        text=True, errors='ignore')
+        + [host, f'cd {remote_dir} && sha256sum {quoted} 2>/dev/null || true'],
+        capture_output=True, text=True, errors='ignore')
+    if proc.returncode != 0:
+        raise SystemExit(f'[FAIL] 连不上 {host} 或读不到 {remote_dir}：'
+                         f'{(proc.stderr or "").strip()[:300]}')
     sums = {}
-    for line in out.splitlines():
+    for line in proc.stdout.splitlines():
         parts = line.split()
         if len(parts) == 2:
             sums[parts[1]] = parts[0]
     return sums
+
+
+def plan_uploads(expected: dict, remote: dict, force: bool = False) -> tuple:
+    """决定哪些文件要传：服务器 sha 与本机一致的跳过。
+
+    返回 ``(todo, skipped)``，两组都按文件名排序，保证日志可对账。
+    """
+    names = sorted(expected)
+    if force:
+        return names, []
+    skipped = [n for n in names if remote.get(n) == expected[n]]
+    todo = [n for n in names if n not in set(skipped)]
+    return todo, skipped
 
 
 def https_ok(entry_url: str, expect_size: int) -> bool:
@@ -173,10 +199,20 @@ def main(argv=None) -> int:
     key = Path(args.key)
     names = sorted(payload)
     if not args.skip_upload:
-        print(f'上传 {len(names)} 个包体到 {args.host}:{remote_dir}/ …')
-        if scp(key, [payload[n] for n in names], f'{args.host}:{remote_dir}/') != 0:
-            print('[FAIL] 包体上传失败，清单保持原样未动')
-            return 1
+        print(f'核对服务器上 {len(names)} 个包体的 sha256 …')
+        todo, skipped = plan_uploads(expected, server_shas(key, args.host, remote_dir, names),
+                                     force=args.force)
+        if skipped:
+            saved = sum(payload[n].stat().st_size for n in skipped)
+            print(f'[ok] {len(skipped)} 个包体与服务器一致，跳过上传'
+                  f'（省 {saved / 1048576:.0f}MB）')
+        if todo:
+            print(f'上传 {len(todo)} 个包体到 {args.host}:{remote_dir}/ …')
+            if scp(key, [payload[n] for n in todo], f'{args.host}:{remote_dir}/') != 0:
+                print('[FAIL] 包体上传失败，清单保持原样未动')
+                return 1
+        else:
+            print('[ok] 包体全部已是最新，无需上传')
 
     print('核对服务器上的 sha256 …')
     remote = server_shas(key, args.host, remote_dir, names)
