@@ -67,6 +67,9 @@ docs/安全审计_完整版.md
 docs/安全修复_TODO.md
 docs/审计_*.md
 docs/域名与源站安全排查报告_*.md
+docs/迁移计划_*.md
+docs/本机数据备份计划书_*.md
+docs/TeamCity_CICD_上手.md
 docs/ACCEPTED_RISKS.md
 docs/FIX_PLAN.md
 *.aux
