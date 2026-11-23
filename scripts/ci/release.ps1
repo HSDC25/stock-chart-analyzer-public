@@ -9,7 +9,7 @@
 
     -PublishOnly   不构建不签名，直接把现有 update_dist\update.json 重新上传（重试上传用）
     -UiOnly        只重打界面包（跳过 EXE 构建与签名，通常配合 -UiVersion）
-    -SkipBuild     用 outputs\ 里已有的 exe 重签/重出清单
+    -SkipBuild     跳过构建，用现有 dist 产物重签/重出清单（快速验证）
     -SkipSign      跳过签名（产物不能对外发布，只适合本机调试）
     -SkipTests     跳过 pytest（只在你刚跑过测试时用）
     -DryRun        走到上传那步只校验不真传，也不做线上验收
