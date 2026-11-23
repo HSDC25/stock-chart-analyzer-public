@@ -359,9 +359,14 @@ def background_preload(state=None):
                             state._record_skip()
                             return
                         elif gap <= 7:
-                            fetch_days = 3
+                            # 日历日→交易日要留缓冲，否则周末/小长假会留缺口
+                            fetch_days = gap + 3
                         elif gap <= 30:
-                            fetch_days = 10
+                            fetch_days = gap + 7
+                        else:
+                            # 长期未开：按缺口回补（上限与筛选 days 参数一致），
+                            # 固定抓 30 天会在库中间留下一段空洞
+                            fetch_days = min(250, gap + 10)
                 except Exception as e:
                     logger.debug("freshness check failed, defaulting to 30 days: %s", e)
 

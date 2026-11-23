@@ -15,15 +15,16 @@ from common.screening import is_limit_up
 DATES = pd.bdate_range("2024-06-03", periods=20)
 
 
-def _frame(pcts, volumes, closes=None, lows=None):
+def _frame(pcts, volumes, closes=None, lows=None, dates=None):
     """按每日涨跌幅反推 OHLC；close 可显式给出，low 默认取收盘价下方 1%。"""
+    dates = DATES if dates is None else dates
     if closes is None:
         closes, price = [], 10.0
         for pct in pcts:
             price = round(price * (1 + pct / 100.0), 2)
             closes.append(price)
     return pd.DataFrame({
-        "date": DATES[:len(closes)],
+        "date": dates[:len(closes)],
         "open": closes,
         "close": closes,
         "high": [c * 1.01 for c in closes],
@@ -36,8 +37,12 @@ def _frame(pcts, volumes, closes=None, lows=None):
 
 
 def _seed(db):
-    # 4 连板（主板 10%）
-    save_kline_to_db("600001", _frame([0] * 16 + [10] * 4, [100] * 20), db_path=db)
+    # 4 连板（主板 10%）：最低价刻意与收盘价拉开，防止"误用 low 算区间涨幅"再次蒙混过关
+    closes = [10.0] * 16 + [11.0, 12.1, 13.31, 14.64]
+    lows = [c * 0.99 for c in closes]
+    lows[15], lows[19] = 9.0, 13.0
+    save_kline_to_db("600001", _frame([0] * 16 + [10] * 4, [100] * 20, closes, lows),
+                     db_path=db)
     # 2 连板
     save_kline_to_db("600002", _frame([0] * 18 + [10, 10], [100] * 20), db_path=db)
     # 涨停后缩量回调：第 15 根涨停，之后回撤约 8%，最新量能 0.3 倍
@@ -54,12 +59,23 @@ def _seed(db):
     save_kline_to_db("600005", _frame([0] * 17 + [10, 10], [100] * 19), db_path=db)
     # 首板：此前 19 天无涨停，仅最新一天涨停（主板 10%）
     save_kline_to_db("600006", _frame([0] * 19 + [10], [100] * 20), db_path=db)
+    # 最新一板是一字板（开=收=高=低），前一日为普通涨停
+    one_word = _frame([0] * 18 + [10, 10], [100] * 20)
+    one_word.loc[19, ["open", "close", "high", "low"]] = [13.31, 13.31, 13.31, 13.31]
+    save_kline_to_db("600007", one_word, db_path=db)
+    # 退市整理期 / ST：即使涨停也不参与任何榜单
+    save_kline_to_db("600008", _frame([0] * 18 + [10, 10], [100] * 20), db_path=db)
+    save_kline_to_db("600009", _frame([0] * 18 + [10, 10], [100] * 20), db_path=db)
+    # 14 个交易日前的涨停：按"15 个交易日无涨停"的首板口径应被排除
+    save_kline_to_db("600012", _frame([0] * 5 + [10] + [0] * 14, [100] * 20), db_path=db)
 
     conn = sqlite3.connect(db)
     rows = [("600001", "连板四", 14.0, 10.0), ("600002", "连板二", 12.0, 10.0),
             ("600003", "缩量回调", 10.15, -1.0), ("600004", "新高突破", 10.3, 3.0),
             ("689001", "科创CDR", 14.0, 12.0), ("600005", "停牌股", 12.0, 10.0),
-            ("600006", "今日首板", 11.0, 10.0)]
+            ("600006", "今日首板", 11.0, 10.0), ("600007", "一字连板", 13.31, 10.0),
+            ("600008", "某某退", 12.0, 10.0), ("600009", "ST风险", 12.0, 10.0),
+            ("600012", "十四日前涨停", 11.0, 10.0)]
     conn.executemany(
         "INSERT INTO stock_metadata (code, name, price, change_pct) VALUES (?, ?, ?, ?)", rows)
     conn.commit()
@@ -101,12 +117,56 @@ def test_consecutive_limit_up_min_boards_filters(client):
     assert "600002" not in _codes(client.get("/api/screen/consecutive_limit_up?min_boards=3"))
 
 
+def test_consecutive_limit_up_total_gain_uses_close(client):
+    # 区间涨幅必须以收盘价计：600001 四板 10 -> 14.64（+46.4%），
+    # 误用最低价会得到 (13.0-9.0)/9.0 = 44.4%
+    payload = client.get("/api/screen/consecutive_limit_up?min_boards=2").get_json()
+    by_code = {row["code"]: row for row in payload["data"]}
+    assert 46.3 <= by_code["600001"]["total_gain"] <= 46.5
+    assert 20.9 <= by_code["600002"]["total_gain"] <= 21.1
+
+
+def test_consecutive_limit_up_marks_one_word(client):
+    payload = client.get("/api/screen/consecutive_limit_up?min_boards=2").get_json()
+    by_code = {row["code"]: row for row in payload["data"]}
+    assert by_code["600007"]["is_one_word"] is True
+    assert by_code["600007"]["one_word_boards"] == 1
+    assert by_code["600001"]["is_one_word"] is False
+    assert by_code["600001"]["one_word_boards"] == 0
+
+
+def test_risk_warning_and_delisting_stocks_are_excluded(client):
+    # ST/*ST 与退市整理期（简称含“退”）即使连板也不参与榜单
+    for url in ("/api/screen/consecutive_limit_up?min_boards=2",
+                "/api/screen/limit_up_days?days=20&min_count=1"):
+        codes = _codes(client.get(url))
+        assert "600008" not in codes, url
+        assert "600009" not in codes, url
+
+
+def test_risk_name_helpers():
+    from common.screening import exclude_risk_sql, is_risk_name
+    assert is_risk_name("*ST海润")
+    assert is_risk_name("海润退")
+    assert not is_risk_name("平安银行")
+    conn = sqlite3.connect(":memory:")
+    try:
+        expr = ("SELECT COUNT(*) FROM (SELECT '平安银行' AS name UNION ALL "
+                "SELECT 'ST风险' UNION ALL SELECT '某某退') WHERE 1=1 "
+                + exclude_risk_sql("name"))
+        assert conn.execute(expr).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_shrink_pullback_hits_limit_up_then_shrinking_drop(client):
     payload = client.get("/api/screen/shrink_pullback").get_json()
     codes = [row["code"] for row in payload["data"]]
     assert codes == ["600003"]
     row = payload["data"][0]
-    assert 7.0 <= row["pullback_pct"] <= 9.0
+    # 回撤基准必须是涨停日收盘价 11.0（最低价 10.12 会得到 7.07%，落在
+    # 5~15% 区间内，靠宽区间断言抓不住；这里钉死收盘价口径）
+    assert 7.9 <= row["pullback_pct"] <= 8.1
     assert row["vol_shrink_ratio"] <= 0.6
 
 
@@ -146,6 +206,39 @@ def test_window_start_falls_back_when_history_shorter_than_days(tmp_path):
         conn.close()
 
 
+def test_fresh_listing_excluded_when_history_is_mature(tmp_path, monkeypatch):
+    # 库内已有 30 个交易日：只有 5 根 K 线的新股处于"前 5 日无涨跌幅"阶段，
+    # 不能把上市首周的暴涨当成连板/涨停。
+    db = str(tmp_path / "mature.db")
+    init_db(db)
+    dates = pd.bdate_range("2024-03-01", periods=30)
+    save_kline_to_db("600101", _frame([0] * 28 + [10, 10], [100] * 30, dates=dates),
+                     db_path=db)
+    save_kline_to_db("600102", _frame([10] * 5, [100] * 5, dates=dates[-5:]),
+                     db_path=db)
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO stock_metadata (code, name, price, change_pct) VALUES (?, ?, ?, ?)",
+        [("600101", "老股", 12.0, 10.0), ("600102", "新股", 15.0, 10.0)])
+    conn.commit()
+    conn.close()
+
+    import common.config as config
+    monkeypatch.setattr(config, "DB_PATH", db)
+
+    from flask import Flask
+    from common.routes.screen_routes import screen_bp
+    app = Flask("screen-mature")
+    app.register_blueprint(screen_bp)
+    client = app.test_client()
+
+    boards = _codes(client.get("/api/screen/consecutive_limit_up?min_boards=2"))
+    assert "600101" in boards
+    assert "600102" not in boards
+    days = _codes(client.get("/api/screen/limit_up_days?days=20&min_count=1"))
+    assert "600102" not in days
+
+
 def test_new_high_breakout_needs_full_window(client):
     # 只有 19 根 K 线（停牌股）不满足"20 日新高"的窗口要求
     codes = _codes(client.get("/api/screen/new_high_breakout?days=20"))
@@ -180,6 +273,14 @@ def test_first_limit_up_uses_star_board_threshold_for_689(client):
     # 600006 此前无涨停、今日主板 10% 涨停，应入选
     codes = _codes(client.get("/api/screen/first_limit_up"))
     assert "689001" not in codes
+    assert "600006" in codes
+
+
+def test_first_limit_up_window_is_trading_days(client):
+    # 14 个交易日前的涨停仍在"此前 15 个交易日"窗口内 → 不是首板。
+    # 旧实现用 date('-14 days')（自然日 ≈ 10 个交易日），会把它漏掉。
+    codes = _codes(client.get("/api/screen/first_limit_up"))
+    assert "600012" not in codes
     assert "600006" in codes
 
 

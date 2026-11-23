@@ -340,9 +340,10 @@ class TestScreeningSQLRewrites:
         for row in body["data"]:
             assert row["limit_up_days"] >= 2
             assert "ST" not in (row.get("name") or "").upper()
-        # 命中集合应是宽松条件的子集
+        # 命中集合应是宽松条件的子集；默认也排除 ST
         loose = client.get("/api/screen/big_up_days?days=20").get_json()["data"]
         assert len(body["data"]) <= len(loose)
+        assert all("ST" not in (r.get("name") or "").upper() for r in loose)
 
         resp = client.get("/api/screen/big_up_days?days=20&max_drop_pct=-9"
                           "&limit=200")

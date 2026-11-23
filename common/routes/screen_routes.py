@@ -8,7 +8,8 @@ Compatible with Python 3.8+.
 简介：选股策略蓝图（screen_bp）——首板涨停、涨停放量、放量、连阳、
 涨停回落、大涨天数、涨停天数排行等策略筛选，全部直接查本地 SQLite
 （kline_data + stock_metadata）。涨幅阈值按板块区分：主板 9.8%、
-创业板/科创板 19.5%。
+创业板/科创板 19.5%。股票池为沪深主板 + 创业板（不含科创板/北交所）；
+ST/*ST、退市整理期（简称含“退”）与最近才上市（含无涨跌幅期）的次新股统一排除。
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from contextlib import closing
 
 from flask import Blueprint, jsonify, request
 
-from common.screening import limit_up_sql_case
+from common.screening import exclude_risk_sql, is_risk_name, limit_up_sql_case
 
 logger = logging.getLogger("stockchart")
 
@@ -74,8 +75,45 @@ def _attach_meta(hit, meta_row):
     return hit
 
 
-def _is_st(name):
-    return 'ST' in (name or '').upper()
+# 新股上市前 5 个交易日（北交所为首日）不设涨跌幅，涨幅阈值会把它们误判成涨停。
+# 首根 K 线晚于"倒数第 25 个交易日"的股票视为次新股，短线筛选一律排除。
+MIN_HISTORY_BARS = 25
+
+
+def _available_date_count(cur):
+    row = cur.execute('SELECT COUNT(DISTINCT date) FROM kline_data').fetchone()
+    return int(row[0] or 0)
+
+
+def _fresh_listing_clause(cur, col='code'):
+    """返回排除"最近才上市"股票的 SQL 片段。
+
+    判定口径：本地库已有 >= MIN_HISTORY_BARS 个交易日时，首根 K 线晚于
+    "倒数第 25 个交易日" 的股票视为次新股/长期停牌复牌。不用"根数不足"，
+    避免把数据来源暂时缺历史的股票一并误杀。库刚装好时不做此限制，
+    否则全市场都只有几根 K 线、会被清空。
+    """
+    if _available_date_count(cur) < MIN_HISTORY_BARS:
+        return ''
+    cutoff = _window_start(cur, MIN_HISTORY_BARS)
+    if not cutoff or len(cutoff) != 10:
+        return ''
+    cutoff = cutoff.replace("'", "''")
+    return (" AND {c} NOT IN (SELECT code FROM kline_data GROUP BY code "
+            "HAVING MIN(date) > '{d}')").format(c=col, d=cutoff)
+
+
+def _fresh_listing_codes(cur):
+    """Python 路径用的同一份次新股集合（不满足条件时返回空集合）。"""
+    if _available_date_count(cur) < MIN_HISTORY_BARS:
+        return set()
+    cutoff = _window_start(cur, MIN_HISTORY_BARS)
+    if not cutoff:
+        return set()
+    rows = cur.execute(
+        'SELECT code FROM kline_data GROUP BY code HAVING MIN(date) > ?',
+        (cutoff,)).fetchall()
+    return {r[0] for r in rows}
 
 
 def _int_arg(name, default, lo=None, hi=None):
@@ -114,7 +152,7 @@ def _float_arg(name, default, lo=None, hi=None):
 
 @screen_bp.route('/api/screen/first_limit_up')
 def screen_first_limit_up():
-    """First limit-up of the day (limit-up today, no limit-up in prior 14 days)."""
+    """First limit-up of the day (limit-up today, no limit-up in prior 15 trading days)."""
     try:
         from common.config import DB_PATH
 
@@ -127,12 +165,16 @@ def screen_first_limit_up():
             if not latest_date:
                 return jsonify({'success': False, 'error': 'No data'})
 
+            # 首板要求"此前 15 个交易日无涨停"。用交易日下界，不用 '-14 days'
+            # 的自然日窗口（自然日 14 天通常只有 9~10 个交易日）。
+            window_floor = _window_start(cur, 15)
+            fresh_clause = _fresh_listing_clause(cur, 'm.code')
             cur.execute('''
                 WITH recent_limit_up AS (
-                    -- 最近 14 个交易日内出现过涨停的股票集合：
+                    -- 最近 15 个交易日内出现过涨停的股票集合：
                     -- "首板"要求此前两周没有涨停，故用 NOT IN 排除老涨停股
                     SELECT DISTINCT code FROM kline_data
-                    WHERE date >= date(?, '-14 days')
+                    WHERE date >= ?
                       AND date < ?
                       AND pct_change >= ''' + limit_up_sql_case('code') + '''
                 )
@@ -141,12 +183,12 @@ def screen_first_limit_up():
                 FROM stock_metadata m
                 WHERE m.change_pct >= ''' + limit_up_sql_case('m.code') + '''
                   AND m.price > 0
-                  AND m.name NOT LIKE 'ST%' AND m.name NOT LIKE '*ST%'
-                  AND m.name NOT LIKE 'SST%' AND m.name NOT LIKE 'S*ST%'
+                  ''' + exclude_risk_sql('m.name') + '''
+                  ''' + fresh_clause + '''
                   AND m.code NOT IN (SELECT code FROM recent_limit_up)
                 ORDER BY m.change_pct DESC
                 LIMIT ?
-            ''', (latest_date, latest_date, limit))
+            ''', (window_floor, latest_date, limit))
             rows = cur.fetchall()
 
         columns = ['code', 'name', 'price', 'change_pct', 'pe', 'pb',
@@ -189,10 +231,12 @@ def screen_limit_up_volume():
             if not prev_date:
                 return jsonify({'success': False, 'error': 'No previous date'})
 
+            window_floor = _window_start(cur, 15)
+            fresh_clause = _fresh_listing_clause(cur, 'm.code')
             cur.execute('''
                 WITH recent_limit_up AS (
                     SELECT DISTINCT code FROM kline_data
-                    WHERE date >= date(?, '-14 days')
+                    WHERE date >= ?
                       AND date < ?
                       AND pct_change >= ''' + limit_up_sql_case('code') + '''
                 )
@@ -204,14 +248,14 @@ def screen_limit_up_volume():
                 JOIN kline_data yesterday ON yesterday.code = m.code AND yesterday.date = ?
                 WHERE m.change_pct >= ''' + limit_up_sql_case('m.code') + '''
                   AND m.price > 0
-                  AND m.name NOT LIKE 'ST%' AND m.name NOT LIKE '*ST%'
-                  AND m.name NOT LIKE 'SST%' AND m.name NOT LIKE 'S*ST%'
+                  ''' + exclude_risk_sql('m.name') + '''
+                  ''' + fresh_clause + '''
                   AND yesterday.turnover > 0
                   AND today.turnover / yesterday.turnover >= 2.5
                   AND m.code NOT IN (SELECT code FROM recent_limit_up)
                 ORDER BY turnover_ratio DESC
                 LIMIT ?
-            ''', (latest_date, latest_date, latest_date, prev_date, limit))
+            ''', (window_floor, latest_date, latest_date, prev_date, limit))
             rows = cur.fetchall()
 
         columns = ['code', 'name', 'price', 'change_pct', 'pe', 'pb',
@@ -257,6 +301,7 @@ def screen_volume_surge():
             if not prev_date:
                 return jsonify({'success': False, 'error': 'No previous date'})
 
+            fresh_clause = _fresh_listing_clause(cur, 'm.code')
             cur.execute('''
                 SELECT m.code, m.name, m.price, m.change_pct, m.pe, m.pb,
                        m.market_cap, m.volume,
@@ -267,8 +312,8 @@ def screen_volume_surge():
                 JOIN kline_data today ON today.code = m.code AND today.date = ?
                 JOIN kline_data yesterday ON yesterday.code = m.code AND yesterday.date = ?
                 WHERE m.price > 0
-                  AND m.name NOT LIKE 'ST%' AND m.name NOT LIKE '*ST%'
-                  AND m.name NOT LIKE 'SST%' AND m.name NOT LIKE 'S*ST%'
+                  ''' + exclude_risk_sql('m.name') + '''
+                  ''' + fresh_clause + '''
                   AND yesterday.turnover > 0
                   AND today.turnover / yesterday.turnover >= 3.0
                 ORDER BY turnover_ratio DESC
@@ -320,6 +365,7 @@ def screen_consecutive_up():
             d6 = dates[5] if len(dates) > 5 else None
             d7 = dates[6] if len(dates) > 6 else None
 
+            fresh_clause = _fresh_listing_clause(cur, 'm.code')
             query = '''
                 -- 连阳筛选：按最近 7 个交易日日期对 kline_data 自连接 7 次（d1 最新），
                 -- 逐日判断"收盘>开盘"得到 y1..y7，累计涨幅从最早一根阳线的开盘价算起；
@@ -378,8 +424,8 @@ def screen_consecutive_up():
                     LEFT JOIN kline_data d6_data ON d6_data.code = m.code AND d6_data.date = ?
                     LEFT JOIN kline_data d7_data ON d7_data.code = m.code AND d7_data.date = ?
                     WHERE m.price > 0
-                      AND m.name NOT LIKE 'ST%' AND m.name NOT LIKE '*ST%'
-                      AND m.name NOT LIKE 'SST%' AND m.name NOT LIKE 'S*ST%'
+                      ''' + exclude_risk_sql('m.name') + '''
+                      ''' + fresh_clause + '''
                 )
                 SELECT code, name, price, change_pct, pe, pb, market_cap, volume,
                        total_gain, consecutive_days
@@ -434,6 +480,8 @@ def screen_limit_up_pullback():
             latest_date = cur.fetchone()[0]
             if not latest_date:
                 return jsonify({'success': False, 'error': 'No data'})
+
+            fresh_codes = _fresh_listing_codes(cur)
 
             def _match(code, rows):
                 """对单只股票最近 6 根 K 线应用涨停回落逻辑，命中返回结果 dict。"""
@@ -506,6 +554,8 @@ def screen_limit_up_pullback():
                         grouped.setdefault(row[0], []).append(row[1:])
 
                 for code, rows in grouped.items():
+                    if code in fresh_codes:
+                        continue
                     try:
                         hit = _match(code, rows)
                         if hit:
@@ -521,6 +571,8 @@ def screen_limit_up_pullback():
                 all_codes = [row[0] for row in cur.fetchall()]
 
                 for code in all_codes:
+                    if code in fresh_codes:
+                        continue
                     try:
                         cur.execute('''
                             SELECT date, open, close, high, low, pct_change
@@ -545,6 +597,8 @@ def screen_limit_up_pullback():
             final_results = []
             for r in results:
                 row = meta.get(r['code'])
+                if row and is_risk_name(row[1]):
+                    continue
                 if row:
                     _attach_meta(r, row)
                 else:
@@ -589,7 +643,7 @@ def screen_big_up_days():
         min_limit_up = _int_arg('min_limit_up', 0, 0, 10000)
         max_drop_pct = (None if request.args.get('max_drop_pct') is None
                         else _float_arg('max_drop_pct', -3.0, -100.0, 100.0))
-        exclude_st = request.args.get('exclude_st', '0') in ('1', 'true', 'yes')
+        exclude_st = request.args.get('exclude_st', '1') in ('1', 'true', 'yes')
 
         with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
             cur = conn.cursor()
@@ -603,11 +657,15 @@ def screen_big_up_days():
             if max_drop_pct is not None:
                 _drop_cond = 'AND min_pct_10 >= ?'
             _st_cond = "AND name NOT LIKE '%ST%'" if exclude_st else ''
+            _delist_cond = "AND name NOT LIKE '%退%'"
+            _fresh_clause = _fresh_listing_clause(cur, 'code')
             _window_sql = '''
                 WITH meta AS (
                     SELECT code FROM stock_metadata
                     WHERE price IS NOT NULL AND price >= ? AND price <= ?
                       ''' + _st_cond + '''
+                      ''' + _delist_cond + '''
+                      ''' + _fresh_clause + '''
                 ),
                 ranked AS (
                     SELECT code, pct_change, close,
@@ -671,7 +729,7 @@ def screen_big_up_days():
                 _meta_q = '''
                     SELECT code FROM stock_metadata
                     WHERE price IS NOT NULL AND price >= ? AND price <= ?
-                ''' + _st_cond
+                ''' + _st_cond + _delist_cond + _fresh_clause
                 cur.execute(_meta_q, (min_price, max_price))
                 valid_codes = {row[0] for row in cur.fetchall()}
 
@@ -788,6 +846,8 @@ def screen_limit_up_days():
             cur = conn.cursor()
 
             min_bars = max(10, days // 5)
+            risk_clause = exclude_risk_sql('name')
+            fresh_clause = _fresh_listing_clause(cur, 'code')
             _sql = '''
                 WITH ranked AS (
                     SELECT code, pct_change,
@@ -797,7 +857,7 @@ def screen_limit_up_days():
                       AND date >= ?
                       AND code IN (
                           SELECT code FROM stock_metadata
-                          WHERE name NOT LIKE '%ST%'
+                          WHERE 1=1 ''' + risk_clause + ''' ''' + fresh_clause + '''
                       )
                 )
                 SELECT code,
@@ -866,8 +926,11 @@ def screen_consecutive_limit_up():
 
             # 连板最多看 60 个交易日（再长的连板极罕见）；历史不足时自动退化
             cutoff = _window_start(cur, 60)
+            fresh_codes = _fresh_listing_codes(cur)
+            # 列序固定为 date, close, open, high, low, pct_change：
+            # 价格的任何下标计算都必须用这里的顺序（close 是 [1]，不是 [2]）。
             rows = cur.execute('''
-                SELECT code, date, close, low, volume, pct_change
+                SELECT code, date, close, open, high, low, pct_change
                 FROM kline_data
                 WHERE date >= ? AND pct_change IS NOT NULL
                 ORDER BY code, date DESC
@@ -879,27 +942,36 @@ def screen_consecutive_limit_up():
 
             hits = []
             for code, bars in grouped.items():
+                if code in fresh_codes:
+                    continue        # 次新股：上市前 5 日无涨跌幅，会被误判成涨停
                 if not bars or bars[0][0] != latest_date:
                     continue        # 停牌或数据没更新到最新交易日，不算"当前连板"
                 streak = 0
+                one_word_boards = 0
                 for bar in bars:
-                    if is_limit_up(code, bar[4]):
+                    if is_limit_up(code, bar[5]):
                         streak += 1
+                        # 一字板：开=收=高=低，开盘即封死，盘中买不进
+                        if bar[1] == bar[2] == bar[3] == bar[4]:
+                            one_word_boards += 1
                     else:
                         break
                 if streak < min_boards:
                     continue
-                base_close = bars[streak][2] if len(bars) > streak else None
-                latest_close = bars[0][2]
+                base_close = bars[streak][1] if len(bars) > streak else None
+                latest_close = bars[0][1]
                 total_gain = None
                 if base_close and base_close > 0 and latest_close is not None:
                     total_gain = round((latest_close - base_close) / base_close * 100, 2)
+                is_one_word = bars[0][1] == bars[0][2] == bars[0][3] == bars[0][4]
                 hits.append({
                     'code': code,
                     'boards': streak,
                     'first_limit_date': bars[streak - 1][0],
-                    'latest_pct': round(bars[0][4], 2),
+                    'latest_pct': round(bars[0][5], 2),
                     'total_gain': total_gain,
+                    'is_one_word': is_one_word,
+                    'one_word_boards': one_word_boards,
                 })
 
             meta = _meta_map(cur, [h['code'] for h in hits])
@@ -907,7 +979,7 @@ def screen_consecutive_limit_up():
         results = []
         for hit in hits:
             meta_row = meta.get(hit['code'])
-            if not meta_row or _is_st(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
+            if not meta_row or is_risk_name(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
                 continue
             results.append(_attach_meta(hit, meta_row))
         results.sort(key=lambda r: (r['boards'], r.get('change_pct') or 0), reverse=True)
@@ -947,6 +1019,8 @@ def screen_shrink_pullback():
                 return jsonify({'success': False, 'error': 'No data'})
 
             cutoff = _window_start(cur, days)
+            fresh_codes = _fresh_listing_codes(cur)
+            # 列序：date[0], close[1], low[2], volume[3], pct_change[4]
             rows = cur.execute('''
                 SELECT code, date, close, low, volume, pct_change
                 FROM kline_data
@@ -960,6 +1034,8 @@ def screen_shrink_pullback():
 
             hits = []
             for code, bars in grouped.items():
+                if code in fresh_codes:
+                    continue        # 次新股：上市前 5 日无涨跌幅，会被误判成涨停
                 if not bars or bars[0][0] != latest_date or len(bars) < min_days_after + 2:
                     continue
                 limit_idx = None
@@ -969,7 +1045,8 @@ def screen_shrink_pullback():
                         break
                 if limit_idx is None:
                     continue
-                limit_close = bars[limit_idx][2]
+                # 回撤基准是涨停日的收盘价；[2] 是最低价，会把回撤系统性算小
+                limit_close = bars[limit_idx][1]
                 if not limit_close or limit_close <= 0:
                     continue
                 lows = [b[2] for b in bars[:limit_idx] if b[2] is not None]
@@ -979,9 +1056,10 @@ def screen_shrink_pullback():
                 pullback = (limit_close - min_low) / limit_close * 100
                 if not (pullback_min <= pullback <= pullback_max):
                     continue
-                prev_vols = [b[3] for b in bars[1:6] if b[3] is not None]
+                # 停牌日 volume=0 会拉低均量、放大缩量比，均量只取正成交量
+                prev_vols = [b[3] for b in bars[1:6] if b[3] is not None and b[3] > 0]
                 latest_vol = bars[0][3]
-                if not prev_vols or latest_vol is None:
+                if not prev_vols or latest_vol is None or latest_vol <= 0:
                     continue
                 avg_prev = sum(prev_vols) / len(prev_vols)
                 if avg_prev <= 0:
@@ -1004,7 +1082,7 @@ def screen_shrink_pullback():
         results = []
         for hit in hits:
             meta_row = meta.get(hit['code'])
-            if not meta_row or _is_st(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
+            if not meta_row or is_risk_name(meta_row[1]) or not meta_row[2] or meta_row[2] <= 0:
                 continue
             results.append(_attach_meta(hit, meta_row))
         results.sort(key=lambda r: r['pullback_pct'], reverse=True)
@@ -1044,6 +1122,7 @@ def screen_new_high_breakout():
             if not latest_date:
                 return jsonify({'success': False, 'error': 'No data'})
             cutoff = _window_start(cur, days)
+            fresh_clause = _fresh_listing_clause(cur, 'm.code')
 
             rows = cur.execute('''
                 WITH win AS (
@@ -1059,7 +1138,8 @@ def screen_new_high_breakout():
                            MAX(CASE WHEN rn = 1 THEN pct_change END) AS latest_pct,
                            MAX(CASE WHEN rn = 1 THEN date END) AS latest_date,
                            MAX(CASE WHEN rn BETWEEN 2 AND ? THEN close END) AS prev_high,
-                           AVG(CASE WHEN rn BETWEEN 2 AND 6 THEN volume END) AS prev5_volume,
+                           AVG(CASE WHEN rn BETWEEN 2 AND 6 AND volume > 0
+                                    THEN volume END) AS prev5_volume,
                            MAX(CASE WHEN rn = ? THEN close END) AS base_close,
                            COUNT(*) AS bars
                     FROM win
@@ -1085,7 +1165,8 @@ def screen_new_high_breakout():
                   AND s.vol_ratio >= ?
                   AND s.latest_pct >= ?
                   AND m.price > 0
-                  AND m.name NOT LIKE '%ST%'
+                  ''' + exclude_risk_sql('m.name') + '''
+                  ''' + fresh_clause + '''
                 ORDER BY s.vol_ratio DESC
                 LIMIT ?
             ''', (cutoff, days, days, days, min_bars, latest_date,

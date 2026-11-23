@@ -1459,7 +1459,7 @@ function renderRankTable(stocks, title, changeField, resetSort) {
   return '<tr data-code="' + escapeHtml(s.code) + '" tabindex="0" style="cursor:pointer;">' +
   '<td>' + (i + 1) + '</td>' +
   '<td class="stock-code">' + escapeHtml(s.code) + '</td>' +
-  '<td class="stock-name">' + escapeHtml(s.name) + '</td>' +
+  '<td class="stock-name">' + escapeHtml(s.name) + (s.is_one_word ? ' <span class="one-word-tag" title="最新涨停为一字板，开盘即封板">一字</span>' : '') + '</td>' +
   '<td class="text-right">' + fmtNum(s.price, 2) + '</td>' +
   '<td class="text-right ' + changeClass + '">' + fmtPct(s.change_pct) + '</td>' +
   '<td class="text-right ' + ((isBigUpDays || isBoards || isVolRatio) ? '' : extraChangeClass) + '">' + cell6 + '</td>' +
@@ -1508,7 +1508,7 @@ function loadTop5Day() {
 // 首次涨停筛选
 function screenFirstLimitUp(el) {
  fetchRankingWithState('/api/screen/first_limit_up?limit=100', resolveScreenTarget(el, 'btnFirstLimitUp'), function(data) {
-  renderRankTable(data.data, ' 首次涨停（主板10%/创业板20%，14天内首次）', 'change_pct');
+  renderRankTable(data.data, ' 首次涨停（主板10%/创业板20%，15个交易日内首次）', 'change_pct');
  });
 }
 
@@ -1543,7 +1543,7 @@ function screenLimitUpPullback(el) {
 // 20日涨幅超3.5%天数排行（从大到小；股价 6~40 元，20日区间涨幅≤50%）
 function screenBigUpDays(el) {
  fetchRankingWithState('/api/screen/big_up_days?limit=100&min_count=1&days=20', resolveScreenTarget(el, 'btnBigUpDays'), function(data) {
-  renderRankTable(data.data, ' 最近20交易日涨幅超3.5%天数排行（股价6-40元·区间涨幅≤50%）', 'big_up_days');
+  renderRankTable(data.data, ' 最近20交易日涨幅超3.5%天数排行（股价6-40元·区间涨幅≤50%·非ST）', 'big_up_days');
  });
 }
 

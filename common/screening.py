@@ -193,6 +193,21 @@ def compute_volume_change_pct(code: str, end_str: str = None) -> Optional[float]
 GEM_BOARD_PREFIXES = ('3', '688', '689')
 
 
+def is_risk_name(name: str) -> bool:
+    """ST/*ST 与退市整理期（简称含“退”）的股票统一按高风险处理。"""
+    text = name or ''
+    return 'ST' in text.upper() or '退' in text
+
+
+def exclude_risk_sql(col: str = 'name') -> str:
+    """生成排除 ST/*ST 与退市整理期股票的 SQL 片段，与 is_risk_name 同口径。
+
+    ``%ST%`` 能覆盖 ST、*ST、SST、S*ST 等全部风险警示简称；退市整理期的
+    简称统一带“退”字。*col* 由调用方写死（列名，可带表别名），无注入面。
+    """
+    return "AND {c} NOT LIKE '%ST%' AND {c} NOT LIKE '%退%'".format(c=col)
+
+
 def limit_up_threshold(code: str) -> float:
     """涨停阈值按板块区分：创业板/科创板 20%，主板 10%。
 

@@ -959,3 +959,17 @@ body.font-extra-large .sidebar { width: 400px; }
     }
 }
 .rank-selected { outline: 2px solid rgba(127, 197, 255, 0.9); outline-offset: -2px; font-weight: 700; }
+
+/* 一字板标记：只出现在连板榜单，配合 setFontScale 用 em 跟随字号设置 */
+.one-word-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  color: #d29922;
+  font-size: 0.75em;
+  line-height: 1.4;
+  vertical-align: middle;
+  white-space: nowrap;
+}
